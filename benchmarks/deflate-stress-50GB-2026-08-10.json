@@ -1,0 +1,72 @@
+{
+  "date": "2026-08-10",
+  "fastener_version": "1.0.0",
+  "environment": {
+    "cpu": "Intel(R) Core(TM) Ultra 7 265K",
+    "logical_processors": 20,
+    "fastener_threads": 15,
+    "os": "Windows 11 25H2",
+    "os_build": "26200.8875",
+    "filesystem": "NTFS",
+    "storage_scope": "input, archives, and restored output on the same C: drive"
+  },
+  "input": {
+    "path": "%USERPROFILE%\\Downloads\\deflate-stress-50GB.bin",
+    "bytes": 53687091200,
+    "gib": 50.0,
+    "sha256": "27982C97F357564AD84AF44982579A028E19452E5EC1524BEC6E48766637DF92"
+  },
+  "methodology": {
+    "iterations": 1,
+    "timing": "external end-to-end wall clock including process startup",
+    "throughput_units": "decimal GB/s and Gbps calculated from original bytes",
+    "cache_control": "OS caches were not cleared",
+    "sha256_time_included": false,
+    "windows_zip_tool": "Windows inbox tar.exe: bsdtar 3.8.4 / libarchive 3.8.4"
+  },
+  "results": [
+    {
+      "method": "Windows standard ZIP",
+      "archive_bytes": 22834223820,
+      "archive_gib": 21.266,
+      "ratio_percent": 42.532,
+      "compress_seconds": 1123.489283,
+      "compress_gb_s": 0.048,
+      "compress_gbps": 0.382,
+      "decompress_seconds": 374.692722,
+      "decompress_gb_s": 0.143,
+      "decompress_gbps": 1.146,
+      "sha256_match": true
+    },
+    {
+      "method": "Fastener ZIP",
+      "configuration": "single-entry Deflate level 1 with Zip64 when required",
+      "archive_bytes": 29217854618,
+      "archive_gib": 27.211,
+      "ratio_percent": 54.422,
+      "compress_seconds": 180.937728,
+      "compress_gb_s": 0.297,
+      "compress_gbps": 2.374,
+      "decompress_seconds": 289.233981,
+      "decompress_gb_s": 0.186,
+      "decompress_gbps": 1.485,
+      "decompress_workers_used": 1,
+      "sha256_match": true
+    },
+    {
+      "method": "Fastener FST",
+      "configuration": "Balanced level 1, target chunk size 8388608 bytes",
+      "archive_bytes": 3242178415,
+      "archive_gib": 3.020,
+      "ratio_percent": 6.039,
+      "compress_seconds": 212.910202,
+      "compress_gb_s": 0.252,
+      "compress_gbps": 2.017,
+      "decompress_seconds": 147.148123,
+      "decompress_gb_s": 0.365,
+      "decompress_gbps": 2.919,
+      "decompress_workers_used": 15,
+      "sha256_match": true
+    }
+  ]
+}

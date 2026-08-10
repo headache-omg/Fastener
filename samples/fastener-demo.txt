@@ -1,0 +1,11 @@
+FASTENER DEMO DATA
+==================
+sensor=A,mode=steady,value=001,001,001,001,001,001
+sensor=A,mode=steady,value=001,001,001,001,001,001
+sensor=A,mode=steady,value=001,001,001,001,001,001
+sensor=B,mode=steady,value=055,055,055,055,055,055
+sensor=B,mode=steady,value=055,055,055,055,055,055
+sensor=B,mode=steady,value=055,055,055,055,055,055
+This intentionally small sample demonstrates the CLI. For meaningful GPU analysis,
+use a file of at least 8 MiB; smaller files automatically use the CPU analyzer.
+
