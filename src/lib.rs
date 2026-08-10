@@ -1,0 +1,26 @@
+//! Fastener archive engine.
+//!
+//! Content-aware boundaries, independent compression chunks, and checksums are
+//! processed on the CPU for portable and predictable operation.
+
+mod analyzer;
+mod archive;
+mod bundle;
+mod file_ops;
+
+pub use analyzer::{AnalysisBackend, AnalysisReport};
+pub use archive::{
+    ArchiveStats, CompressOptions, VerifyReport, compress_bytes, decompress_bytes, inspect_archive,
+    verify_bytes,
+};
+pub use bundle::{
+    DIRECTORY_MAGIC, DirectoryReport, compress_directory_bundle_with_progress,
+    decompress_directory_bundle_with_progress, verify_directory_bundle_with_progress,
+};
+pub use file_ops::{
+    ProgressInfo, ProgressPhase, ZipCompressionReport, ZipReport, compress_file,
+    compress_file_with_progress, compress_zip_file, compress_zip_file_with_progress,
+    decompress_file, decompress_file_with_progress, extract_zip_file,
+    extract_zip_file_with_progress, verify_file, verify_file_with_progress, verify_zip_file,
+    verify_zip_file_with_progress,
+};
