@@ -1,0 +1,66 @@
+[
+  {
+    "Case": "encrypted",
+    "Variant": "before",
+    "CreateMs": 214.641,
+    "RepairMs": 313.6278,
+    "CreatePeakMiB": 13.18359375,
+    "RepairPeakMiB": 76.6796875
+  },
+  {
+    "Case": "encrypted",
+    "Variant": "after",
+    "CreateMs": 119.7609,
+    "RepairMs": 201.0572,
+    "CreatePeakMiB": 13.26171875,
+    "RepairPeakMiB": 76.66796875
+  },
+  {
+    "Case": "large",
+    "Variant": "before",
+    "CreateMs": 388.3446,
+    "RepairMs": 417.1405,
+    "CreatePeakMiB": 33.6796875,
+    "RepairPeakMiB": 140.07421875
+  },
+  {
+    "Case": "large",
+    "Variant": "after",
+    "CreateMs": 179.5791,
+    "RepairMs": 231.355,
+    "CreatePeakMiB": 34.1640625,
+    "RepairPeakMiB": 140.24609375
+  },
+  {
+    "Case": "small",
+    "Variant": "before",
+    "CreateMs": 224.2862,
+    "RepairMs": 250.7784,
+    "CreatePeakMiB": 13.23046875,
+    "RepairPeakMiB": 13.9453125
+  },
+  {
+    "Case": "small",
+    "Variant": "after",
+    "CreateMs": 115.4082,
+    "RepairMs": 119.3065,
+    "CreatePeakMiB": 13.203125,
+    "RepairPeakMiB": 14.0078125
+  },
+  {
+    "Case": "tiny",
+    "Variant": "before",
+    "CreateMs": 245.6398,
+    "RepairMs": 238.263,
+    "CreatePeakMiB": 12.07421875,
+    "RepairPeakMiB": 12.15234375
+  },
+  {
+    "Case": "tiny",
+    "Variant": "after",
+    "CreateMs": 110.2248,
+    "RepairMs": 119.3923,
+    "CreatePeakMiB": 12.06640625,
+    "RepairPeakMiB": 12.62109375
+  }
+]

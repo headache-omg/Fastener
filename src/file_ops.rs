@@ -7,11 +7,13 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 use std::{
+    borrow::Cow,
     collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{BufReader, BufWriter, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::{
+        Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc::{RecvTimeoutError, sync_channel},
     },
@@ -22,13 +24,19 @@ use std::{
 const ANALYSIS_SEGMENT: usize = 64 * 1024 * 1024;
 const CHUNK_BATCH: usize = 64;
 const DECODE_BATCH: usize = 32;
+const BATCH_BYTES: usize = 256 * 1024 * 1024;
 
-struct EncodedChunk {
+struct EncodedChunk<'a> {
     offset: u64,
     original_len: u32,
     codec: u8,
     checksum: [u8; 32],
-    payload: Vec<u8>,
+    payload: Cow<'a, [u8]>,
+}
+
+struct CompressionWorker {
+    compressor: zstd::bulk::Compressor<'static>,
+    scratch: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +86,8 @@ pub enum ProgressPhase {
     ZipCompressing,
     ZipExtracting,
     ZipVerifying,
+    RecoveryCreating,
+    RecoveryRepairing,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -139,17 +149,14 @@ pub fn compress_file_with_progress(
         "archive would contain too many chunks"
     );
 
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let output_file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(output)
-        .with_context(|| format!("could not create output file {}", output.display()))?;
+    let mut temporary = temporary_output(output)?;
+    // Keep a Zstd context per Rayon worker for this operation. Recreating it
+    // for every large chunk repeatedly allocates its internal workspace.
+    let worker_count = rayon::current_num_threads();
+    let compressors: Vec<Mutex<Option<CompressionWorker>>> =
+        (0..=worker_count).map(|_| Mutex::new(None)).collect();
     let result = (|| -> Result<(u64, usize)> {
-        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, output_file);
+        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, temporary.as_file_mut());
         write_header(
             &mut writer,
             input_size_u64,
@@ -158,15 +165,21 @@ pub fn compress_file_with_progress(
             whole_hash,
         )?;
         let mut raw_chunks = 0usize;
-        for batch_start in (0..chunk_count).step_by(CHUNK_BATCH) {
-            let batch_end = (batch_start + CHUNK_BATCH).min(chunk_count);
-            let encoded: Result<Vec<EncodedChunk>> = (batch_start..batch_end)
+        let mut batch_start = 0;
+        while batch_start < chunk_count {
+            let batch_end = batch_start
+                + batch_len(
+                    (batch_start..chunk_count).map(|i| boundaries[i + 1] - boundaries[i]),
+                    CHUNK_BATCH,
+                );
+            let encoded: Result<Vec<EncodedChunk<'_>>> = (batch_start..batch_end)
                 .into_par_iter()
                 .map(|index| {
                     encode_fast_chunk(
                         boundaries[index],
                         &data[boundaries[index]..boundaries[index + 1]],
                         options.compression_level,
+                        &compressors,
                     )
                 })
                 .collect();
@@ -180,25 +193,24 @@ pub fn compress_file_with_progress(
                 completed,
                 total: input_size_u64,
             });
+            batch_start = batch_end;
         }
         writer.flush()?;
         let archive_size = writer.stream_position()?;
         Ok((archive_size, raw_chunks))
     })();
 
-    match result {
-        Ok((archive_size, raw_chunks)) => Ok(ArchiveStats {
-            original_size: input_size_u64,
-            archive_size,
-            chunk_count,
-            backend,
-            raw_chunks,
-        }),
-        Err(error) => {
-            let _ = fs::remove_file(output);
-            Err(error)
-        }
-    }
+    let (archive_size, raw_chunks) = result?;
+    temporary
+        .persist(output)
+        .context("could not publish archive")?;
+    Ok(ArchiveStats {
+        original_size: input_size_u64,
+        archive_size,
+        chunk_count,
+        backend,
+        raw_chunks,
+    })
 }
 
 /// Decompress a Fastener file in bounded-memory batches.
@@ -222,52 +234,71 @@ pub fn decompress_file_with_progress(
     let mapping = map_required(&archive_file)?;
     let parsed = parse_archive(&mapping)?;
     let workers = WorkerTracker::default();
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let output_file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .read(true)
-        .write(true)
-        .open(output)
-        .with_context(|| format!("could not create restored file {}", output.display()))?;
-    let result = (|| -> Result<()> {
-        output_file.set_len(parsed.original_size as u64)?;
-        if parsed.original_size == 0 {
-            return Ok(());
-        }
-        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, output_file);
-        run_parallel_progress(
-            ProgressPhase::Decompressing,
-            parsed.original_size as u64,
-            &mut progress,
-            |completed| {
-                for batch in parsed.chunks.chunks(DECODE_BATCH) {
-                    let decoded = batch
-                        .par_iter()
-                        .map(|chunk| {
-                            workers.record();
-                            let mut output = vec![0u8; chunk.original_len];
-                            decode_chunk_into(chunk, &mut output)?;
-                            Ok(output)
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    for output in decoded {
-                        writer.write_all(&output)?;
-                        completed.fetch_add(output.len() as u64, Ordering::Relaxed);
+    let mut temporary = temporary_output(output)?;
+    let mut restored_mapping = if parsed.original_size == 0 {
+        None
+    } else {
+        temporary
+            .as_file_mut()
+            .set_len(parsed.original_size as u64)
+            .context("could not reserve restored file")?;
+        // SAFETY: the temporary file is not resized or written via another
+        // handle while this writable mapping exists.
+        Some(
+            unsafe { MmapOptions::new().map_mut(temporary.as_file()) }
+                .context("could not memory-map restored file")?,
+        )
+    };
+    let result = run_parallel_progress(
+        ProgressPhase::Decompressing,
+        parsed.original_size as u64,
+        &mut progress,
+        |completed| {
+            let mut hasher = blake3::Hasher::new();
+            if let Some(restored) = restored_mapping.as_mut() {
+                let mut remaining: &mut [u8] = restored;
+                let mut remaining_chunks = parsed.chunks.as_slice();
+                while !remaining_chunks.is_empty() {
+                    let count = batch_len(
+                        remaining_chunks.iter().map(|chunk| chunk.original_len),
+                        DECODE_BATCH,
+                    );
+                    let (batch, tail_chunks) = remaining_chunks.split_at(count);
+                    let batch_bytes: usize = batch.iter().map(|chunk| chunk.original_len).sum();
+                    let (batch_output, tail_output) = remaining.split_at_mut(batch_bytes);
+                    let mut slots = &mut *batch_output;
+                    let mut jobs = Vec::with_capacity(count);
+                    for chunk in batch {
+                        let (output, tail) = slots.split_at_mut(chunk.original_len);
+                        jobs.push((chunk, output));
+                        slots = tail;
                     }
+                    jobs.into_par_iter().try_for_each(|(chunk, output)| {
+                        workers.record();
+                        decode_chunk_into(chunk, output)?;
+                        completed.fetch_add(output.len() as u64, Ordering::Relaxed);
+                        Ok::<(), anyhow::Error>(())
+                    })?;
+                    // Hash before this part of the mapped output can be
+                    // evicted; a later whole-file pass rereads large files.
+                    update_whole_hash(&mut hasher, batch_output);
+                    remaining = tail_output;
+                    remaining_chunks = tail_chunks;
                 }
-                writer.flush()?;
-                Ok(())
-            },
-        )?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(output);
-        return Err(error);
-    }
+                ensure!(remaining.is_empty(), "chunks do not cover restored file");
+            }
+            ensure!(
+                hasher.finalize().as_bytes() == &parsed.whole_hash,
+                "whole-file checksum mismatch"
+            );
+            Ok(())
+        },
+    );
+    drop(restored_mapping);
+    result?;
+    temporary
+        .persist(output)
+        .context("could not publish restored file")?;
     Ok(VerifyReport {
         original_size: parsed.original_size as u64,
         archive_size,
@@ -300,12 +331,25 @@ pub fn verify_file_with_progress(
         parsed.original_size as u64,
         &mut progress,
         |completed| {
-            parsed.chunks.par_iter().try_for_each(|chunk| {
-                workers.record();
-                decode_chunk(chunk)?;
-                completed.fetch_add(chunk.original_len as u64, Ordering::Relaxed);
-                Ok(())
-            })
+            let mut hasher = blake3::Hasher::new();
+            for batch in decode_batches(&parsed.chunks) {
+                let decoded = batch
+                    .par_iter()
+                    .map(|chunk| {
+                        workers.record();
+                        decode_chunk(chunk)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for data in decoded {
+                    update_whole_hash(&mut hasher, &data);
+                    completed.fetch_add(data.len() as u64, Ordering::Relaxed);
+                }
+            }
+            ensure!(
+                hasher.finalize().as_bytes() == &parsed.whole_hash,
+                "whole-file checksum mismatch"
+            );
+            Ok(())
         },
     )?;
     Ok(VerifyReport {
@@ -352,9 +396,11 @@ pub fn compress_zip_file_with_progress(
         .context("ZIP input path does not have a file name")?
         .to_string_lossy()
         .into_owned();
-    let output_file = File::create(output)
-        .with_context(|| format!("could not create ZIP {}", output.display()))?;
-    let mut archive = zip::ZipWriter::new(BufWriter::with_capacity(8 * 1024 * 1024, output_file));
+    let mut temporary = temporary_output(output)?;
+    let mut archive = zip::ZipWriter::new(BufWriter::with_capacity(
+        8 * 1024 * 1024,
+        temporary.as_file_mut(),
+    ));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .compression_level(Some(i64::from(compression_level)))
@@ -391,6 +437,10 @@ pub fn compress_zip_file_with_progress(
         completed == original_size,
         "input size changed while creating ZIP"
     );
+    drop(output_writer);
+    temporary
+        .persist(output)
+        .context("could not publish ZIP archive")?;
 
     Ok(ZipCompressionReport {
         original_size,
@@ -643,51 +693,97 @@ fn segmented_analysis(
             *blake3::hash(data).as_bytes(),
         ));
     }
-    let mut boundaries = vec![0usize];
-    let mut backend = AnalysisBackend::Cpu;
-    let mut hasher = blake3::Hasher::new();
-    for segment_start in (0..data.len()).step_by(ANALYSIS_SEGMENT) {
-        let segment_end = (segment_start + ANALYSIS_SEGMENT).min(data.len());
-        let segment = &data[segment_start..segment_end];
-        hasher.update(segment);
-        let report = analyze(segment, target, data.len())?;
-        if matches!(backend, AnalysisBackend::Cpu)
-            && let AnalysisBackend::Hybrid(_) = &report.backend
-        {
-            backend = report.backend.clone();
-        }
-        for local in report.boundaries.into_iter().skip(1) {
-            let global = segment_start + local;
-            if boundaries.last() != Some(&global) {
-                boundaries.push(global);
-            }
-        }
-        progress(ProgressInfo {
-            phase: ProgressPhase::Analyzing,
-            completed: segment_end as u64,
-            total: data.len() as u64,
+    thread::scope(|scope| {
+        // For large inputs, overlap the full-file hash with CPU/GPU boundary
+        // analysis. Both read the input mapping, and the digest remains exactly
+        // the same as the old segment-by-segment update.
+        let hash_worker = (data.len() >= 128 * 1024 * 1024).then(|| {
+            scope.spawn(|| {
+                let mut hasher = blake3::Hasher::new();
+                update_whole_hash(&mut hasher, data);
+                *hasher.finalize().as_bytes()
+            })
         });
-    }
-    if boundaries.last() != Some(&data.len()) {
-        boundaries.push(data.len());
-    }
-    Ok((boundaries, backend, *hasher.finalize().as_bytes()))
+        let mut boundaries = vec![0usize];
+        let mut backend = AnalysisBackend::Cpu;
+        let mut hasher = blake3::Hasher::new();
+        for segment_start in (0..data.len()).step_by(ANALYSIS_SEGMENT) {
+            let segment_end = (segment_start + ANALYSIS_SEGMENT).min(data.len());
+            let segment = &data[segment_start..segment_end];
+            if hash_worker.is_none() {
+                update_whole_hash(&mut hasher, segment);
+            }
+            let report = analyze(segment, target, data.len())?;
+            if matches!(backend, AnalysisBackend::Cpu)
+                && let AnalysisBackend::Hybrid(_) = &report.backend
+            {
+                backend = report.backend.clone();
+            }
+            for local in report.boundaries.into_iter().skip(1) {
+                let global = segment_start + local;
+                if boundaries.last() != Some(&global) {
+                    boundaries.push(global);
+                }
+            }
+            progress(ProgressInfo {
+                phase: ProgressPhase::Analyzing,
+                completed: segment_end as u64,
+                total: data.len() as u64,
+            });
+        }
+        if boundaries.last() != Some(&data.len()) {
+            boundaries.push(data.len());
+        }
+        let whole_hash = match hash_worker {
+            Some(worker) => worker
+                .join()
+                .map_err(|_| anyhow!("whole-file checksum worker panicked"))?,
+            None => *hasher.finalize().as_bytes(),
+        };
+        Ok((boundaries, backend, whole_hash))
+    })
 }
 
-fn encode_fast_chunk(offset: usize, source: &[u8], compression_level: i32) -> Result<EncodedChunk> {
+fn encode_fast_chunk<'a>(
+    offset: usize,
+    source: &'a [u8],
+    compression_level: i32,
+    compressors: &[Mutex<Option<CompressionWorker>>],
+) -> Result<EncodedChunk<'a>> {
     ensure!(source.len() <= u32::MAX as usize, "chunk is too large");
-    let (compressed, compressed_codec) = if compression_level <= 0 {
-        (lz4_flex::block::compress(source), 2)
+    let (codec, payload) = if compression_level <= 0 {
+        let compressed = lz4_flex::block::compress(source);
+        if compressed.len() < source.len() {
+            (2, Cow::Owned(compressed))
+        } else {
+            (0, Cow::Borrowed(source))
+        }
     } else {
-        (
-            zstd::bulk::compress(source, compression_level).context("zstd compression failed")?,
-            1,
-        )
-    };
-    let (codec, payload) = if compressed.len() < source.len() {
-        (compressed_codec, compressed)
-    } else {
-        (0, source.to_vec())
+        let index = rayon::current_thread_index().unwrap_or(compressors.len() - 1);
+        let mut worker = compressors[index]
+            .lock()
+            .map_err(|_| anyhow!("zstd compressor worker failed"))?;
+        if worker.is_none() {
+            *worker = Some(CompressionWorker {
+                compressor: zstd::bulk::Compressor::new(compression_level)
+                    .context("could not initialize zstd compressor")?,
+                scratch: Vec::new(),
+            });
+        }
+        let worker = worker.as_mut().unwrap();
+        worker.scratch.clear();
+        worker
+            .scratch
+            .reserve(zstd::zstd_safe::compress_bound(source.len()));
+        worker
+            .compressor
+            .compress_to_buffer(source, &mut worker.scratch)
+            .context("zstd compression failed")?;
+        if worker.scratch.len() < source.len() {
+            (1, Cow::Owned(std::mem::take(&mut worker.scratch)))
+        } else {
+            (0, Cow::Borrowed(source))
+        }
     };
     ensure!(
         payload.len() <= u32::MAX as usize,
@@ -702,10 +798,71 @@ fn encode_fast_chunk(offset: usize, source: &[u8], compression_level: i32) -> Re
     })
 }
 
-fn decode_chunk(chunk: &ParsedChunk<'_>) -> Result<Vec<u8>> {
+fn decode_chunk<'a>(chunk: &ParsedChunk<'a>) -> Result<Cow<'a, [u8]>> {
+    if chunk.codec == 0 {
+        ensure!(
+            chunk.payload.len() == chunk.original_len,
+            "raw chunk has the wrong length"
+        );
+        ensure!(
+            blake3::hash(chunk.payload).as_bytes() == &chunk.checksum,
+            "checksum mismatch in chunk at offset {}",
+            chunk.offset
+        );
+        return Ok(Cow::Borrowed(chunk.payload));
+    }
     let mut data = vec![0u8; chunk.original_len];
     decode_chunk_into(chunk, &mut data)?;
-    Ok(data)
+    Ok(Cow::Owned(data))
+}
+
+pub(crate) fn update_whole_hash(hasher: &mut blake3::Hasher, data: &[u8]) {
+    if data.len() >= 1024 * 1024 {
+        hasher.update_rayon(data);
+    } else {
+        hasher.update(data);
+    }
+}
+
+// Bound aggregate decoded bytes as well as task count. A single oversized
+// chunk is processed alone; the format permits chunks larger than this budget.
+fn batch_len(lengths: impl Iterator<Item = usize>, max_chunks: usize) -> usize {
+    let mut bytes = 0usize;
+    let mut count = 0;
+    for len in lengths.take(max_chunks) {
+        if count > 0 && len > BATCH_BYTES.saturating_sub(bytes) {
+            break;
+        }
+        bytes = bytes.saturating_add(len);
+        count += 1;
+    }
+    count
+}
+
+fn decode_batches<'a, 'b>(
+    mut chunks: &'a [ParsedChunk<'b>],
+) -> impl Iterator<Item = &'a [ParsedChunk<'b>]> {
+    std::iter::from_fn(move || {
+        if chunks.is_empty() {
+            return None;
+        }
+        let count = batch_len(chunks.iter().map(|c| c.original_len), DECODE_BATCH);
+        let (batch, remaining) = chunks.split_at(count);
+        chunks = remaining;
+        Some(batch)
+    })
+}
+
+fn temporary_output(output: &Path) -> Result<tempfile::NamedTempFile> {
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    tempfile::Builder::new()
+        .prefix(".fastener-output-")
+        .tempfile_in(parent)
+        .context("could not create temporary output")
 }
 
 fn decode_chunk_into(chunk: &ParsedChunk<'_>, output: &mut [u8]) -> Result<()> {
@@ -757,7 +914,7 @@ fn write_header(
     Ok(())
 }
 
-fn write_chunk(writer: &mut impl Write, chunk: &EncodedChunk) -> Result<()> {
+fn write_chunk(writer: &mut impl Write, chunk: &EncodedChunk<'_>) -> Result<()> {
     writer.write_all(&chunk.offset.to_le_bytes())?;
     writer.write_all(&chunk.original_len.to_le_bytes())?;
     writer.write_all(&(chunk.payload.len() as u32).to_le_bytes())?;
@@ -796,6 +953,34 @@ fn ensure_distinct(input: &Path, output: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn batches_respect_byte_and_count_limits() {
+        assert_eq!(batch_len([100 * 1024 * 1024; 8].into_iter(), 32), 2);
+        assert_eq!(batch_len([BATCH_BYTES + 1, 1].into_iter(), 32), 1);
+        assert_eq!(batch_len([1; 40].into_iter(), 32), 32);
+        assert_eq!(batch_len([].into_iter(), 32), 0);
+    }
+
+    #[test]
+    fn incompressible_file_chunk_borrows_input_instead_of_copying() {
+        let mut state = 0x1234_5678u32;
+        let data: Vec<u8> = (0..1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        let compressors: Vec<_> = (0..=rayon::current_num_threads())
+            .map(|_| Mutex::new(None))
+            .collect();
+        let chunk = encode_fast_chunk(0, &data, 1, &compressors).unwrap();
+        assert_eq!(chunk.codec, 0);
+        assert!(matches!(chunk.payload, Cow::Borrowed(_)));
+        assert_eq!(chunk.payload.as_ref().as_ptr(), data.as_ptr());
+    }
 
     #[test]
     fn balanced_and_fast_file_modes_round_trip() {

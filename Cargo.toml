@@ -1,6 +1,6 @@
 [package]
 name = "fastener"
-version = "1.0.0"
+version = "1.2.3"
 edition = "2024"
 description = "Parallel Fastener archiver with automatic hybrid CPU/GPU boundary analysis"
 license = "MIT"
@@ -11,9 +11,15 @@ gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dependencies]
 anyhow = "1.0"
-blake3 = "1.8"
+argon2 = { version = "0.5.3", features = ["zeroize"] }
+chacha20poly1305 = "0.10.1"
+getrandom = "0.4"
+rpassword = "7.4"
+zeroize = "1.8"
+blake3 = { version = "1.8", features = ["rayon"] }
 clap = { version = "4.6", features = ["derive"] }
 rayon = "1.12"
+reed-solomon-erasure = "6.0.0"
 zstd = "0.13"
 lz4_flex = { version = "0.14.0", default-features = false, features = ["std"] }
 memmap2 = "0.9.11"

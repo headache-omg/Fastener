@@ -1,0 +1,56 @@
+[
+  {
+    "Case": "mixed",
+    "Strategy": "fixed",
+    "AnalysisMs": 0.0023,
+    "CompressMs": 14.8573,
+    "DecodeMs": 47.1184,
+    "EstimatedBytes": 67143298,
+    "Chunks": 32
+  },
+  {
+    "Case": "mixed",
+    "Strategy": "content",
+    "AnalysisMs": 27.3334,
+    "CompressMs": 14.4675,
+    "DecodeMs": 47.8646,
+    "EstimatedBytes": 67143298,
+    "Chunks": 32
+  },
+  {
+    "Case": "random",
+    "Strategy": "fixed",
+    "AnalysisMs": 0.0019,
+    "CompressMs": 22.7639,
+    "DecodeMs": 23.3561,
+    "EstimatedBytes": 134218620,
+    "Chunks": 16
+  },
+  {
+    "Case": "random",
+    "Strategy": "content",
+    "AnalysisMs": 13.1263,
+    "CompressMs": 22.5663,
+    "DecodeMs": 24.5272,
+    "EstimatedBytes": 134218516,
+    "Chunks": 14
+  },
+  {
+    "Case": "small",
+    "Strategy": "fixed",
+    "AnalysisMs": 0.0006,
+    "CompressMs": 0.4178,
+    "DecodeMs": 0.9629,
+    "EstimatedBytes": 1804,
+    "Chunks": 16
+  },
+  {
+    "Case": "small",
+    "Strategy": "content",
+    "AnalysisMs": 0.0525,
+    "CompressMs": 0.4477,
+    "DecodeMs": 1.1981,
+    "EstimatedBytes": 1614,
+    "Chunks": 14
+  }
+]

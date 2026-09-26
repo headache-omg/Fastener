@@ -1,0 +1,16 @@
+{
+  "BeforeSha256": "58D9266B1560FBDB5B6EC33A9B41959D184A0AC5A499750F532386F18E05762B",
+  "Fixtures": [
+    {
+      "Name": "small.fst",
+      "Sha256": "326A46142540D4867609C41DC47F19EE0215994294217FBC9EA7B37F80DCD070"
+    },
+    {
+      "Name": "large.fst",
+      "Sha256": "7831D617955C5438BCFA196D1AE54F3B4DF1A2053F2430DBA82481086639AC00"
+    }
+  ],
+  "ExampleSha256": "51D66EDF1CB96A47FA5748D412A27955A9D7BE5EEB706126D4106399E96852CA",
+  "Method": "Same example compiled with original 1.2.0 source and current 1.2.1. Two reversed-order passes; one warmup then five samples per process. Startup, fixture preparation and external hash comparisons excluded; actual file IO and internal verification included. 15 workers. Cache not cleared.",
+  "AfterSha256": "EBBC69BA4CC6448CD5168519E780F7C51154BD19758EA8B82C64318D197D7B45"
+}
