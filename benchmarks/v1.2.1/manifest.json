@@ -1,0 +1,11 @@
+{
+  "AfterVersion": "fastener 1.2.1",
+  "BeforeVersion": "fastener 1.2.0",
+  "Method": "Same directory, alternating independent versions, one warmup + measured runs; process startup and IO included; cache not cleared; SHA256 excluded. Windows PeakWorkingSet64 sampled every 5ms while process runs; may miss the final peak. Repair includes archive verification and encrypted authentication.",
+  "OS": "Microsoft Windows NT 10.0.26200.0",
+  "Iterations": 5,
+  "AfterSha256": "04C6D94655850D5F40D147C8E95E6E374AAB21BF7699AD827B6B93ED631C68CF",
+  "LogicalProcessors": 20,
+  "BeforeSha256": "F6F44F0FBFE2870E168C10CFD0C227F8B32F627F564C270BCD28A2C84FA18FDF",
+  "Threads": 15
+}

@@ -1,0 +1,11 @@
+{
+  "TargetChunkBytes": 65536,
+  "InputBytes": 1048576,
+  "Threads": 15,
+  "AfterVersion": "fastener 1.1.0",
+  "AfterSha256": "D5ED1A2C8F8BD773B1DD37290C822DFC4345C8A42DAAFCB2107CDA12AA2D905D",
+  "Method": "Process startup and file IO included; 1 warmup then 5 runs per variant in alternating order; OS cache not cleared; SHA256 time excluded",
+  "BeforeSha256": "C897D0DE823FB87FB3572E27EA6E55E4A539389F546283A0FAACBDC408870D0C",
+  "BeforeVersion": "fastener 1.0.2",
+  "InputSha256": "8F6597D0287E6872E9E7B9A450B81FA30CD9A4ECF591C5712B4666CE35FB36F1"
+}

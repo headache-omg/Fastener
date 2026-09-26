@@ -1,0 +1,13 @@
+{
+  "Version": "1.2.1",
+  "GpuEnabledTests": 56,
+  "CpuOnlyTests": 54,
+  "RecoveryRetestAfterBufferRelease": 10,
+  "Clippy": "passed",
+  "Format": "passed",
+  "CliRestoreChecks": 48,
+  "EngineRestoreChecks": 48,
+  "RecoveryBytesIdentical": true,
+  "CliSha256": "04C6D94655850D5F40D147C8E95E6E374AAB21BF7699AD827B6B93ED631C68CF",
+  "GuiSha256": "E47292A38E02703C6BFF81AFFC14F337F04197E89441626CA64CF113D5610AF3"
+}

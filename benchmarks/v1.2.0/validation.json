@@ -1,0 +1,12 @@
+{
+  "Version": "1.2.0",
+  "GpuEnabledTests": 55,
+  "CpuOnlyTests": 53,
+  "RecoveryIntegrationTests": 10,
+  "Clippy": "passed",
+  "Format": "passed",
+  "GuiRecoveryWorker": "passed",
+  "RestoredArchiveSha256Checks": 16,
+  "CliSha256": "F6F44F0FBFE2870E168C10CFD0C227F8B32F627F564C270BCD28A2C84FA18FDF",
+  "GuiSha256": "950DDE5A9D8310B9DCDE847FC04B9705D487B0C04F296B677F177192852592B1"
+}

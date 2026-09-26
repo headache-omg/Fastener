@@ -6,9 +6,21 @@
 mod analyzer;
 mod archive;
 mod bundle;
+mod encrypted;
 mod file_ops;
+mod recovery;
 
-pub use analyzer::{AnalysisBackend, AnalysisReport};
+pub use recovery::{
+    RecoveryInfo, RecoveryReport, create_recovery_with_progress, recovery_info, recovery_path,
+    recovery_plan, repair_with_progress, repaired_path,
+};
+
+pub use encrypted::{
+    ENCRYPTED_MAGIC, EncryptedReport, compress_encrypted_with_progress,
+    decompress_encrypted_with_progress, encrypted_is_directory, verify_encrypted_with_progress,
+};
+
+pub use analyzer::{AnalysisBackend, AnalysisReport, analyze};
 pub use archive::{
     ArchiveStats, CompressOptions, VerifyReport, compress_bytes, decompress_bytes, inspect_archive,
     verify_bytes,

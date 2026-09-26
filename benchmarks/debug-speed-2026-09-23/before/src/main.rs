@@ -1,0 +1,461 @@
+use anyhow::{Context, Result, bail, ensure};
+use clap::{Parser, Subcommand};
+use fastener::{
+    CompressOptions, DIRECTORY_MAGIC, compress_directory_bundle_with_progress, compress_file,
+    compress_zip_file, decompress_directory_bundle_with_progress, decompress_file,
+    extract_zip_file, verify_directory_bundle_with_progress, verify_file, verify_zip_file,
+};
+use rayon::ThreadPoolBuilder;
+use std::{
+    fs::{self, File},
+    io::{BufReader, Read},
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+#[derive(Parser, Debug)]
+#[command(name = "fastener", version, about = "Parallel Fastener archiver")]
+struct Cli {
+    /// Number of CPU worker threads (defaults to Rayon auto-detection).
+    #[arg(long, global = true, value_name = "N")]
+    threads: Option<usize>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Compress one file into a .fst archive.
+    Compress {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value_t = 8 * 1024 * 1024, value_name = "BYTES")]
+        chunk_size: usize,
+        /// 0 = fastest LZ4, 1 = balanced Zstd, 12 = dense Zstd.
+        #[arg(short, long, default_value_t = 1, value_parser = clap::value_parser!(i32).range(0..=22))]
+        level: i32,
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Compress one file into a conventional Deflate/Zip64 .zip archive.
+    ZipCompress {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Deflate compression level (0 = no compression work, 9 = densest).
+        #[arg(short, long, default_value_t = 1, value_parser = clap::value_parser!(i32).range(0..=9))]
+        level: i32,
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Decompress a .fst archive.
+    Decompress {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Fully decode an archive in memory and verify every checksum.
+    Verify { input: PathBuf },
+    /// Measure compression and decompression on one input file.
+    Benchmark {
+        input: PathBuf,
+        #[arg(short, long, default_value_t = 3)]
+        iterations: usize,
+        #[arg(long, default_value_t = 8 * 1024 * 1024, value_name = "BYTES")]
+        chunk_size: usize,
+        /// 0 = fastest LZ4, 1 = balanced Zstd, 12 = dense Zstd.
+        #[arg(short, long, default_value_t = 1, value_parser = clap::value_parser!(i32).range(0..=22))]
+        level: i32,
+    },
+}
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("error: {error:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let cli = Cli::parse();
+    if let Some(threads) = cli.threads {
+        ensure!(threads > 0, "--threads must be greater than zero");
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .context("could not configure worker threads")?;
+    }
+
+    match cli.command {
+        Command::Compress {
+            input,
+            output,
+            chunk_size,
+            level,
+            force,
+        } => {
+            let output = output.unwrap_or_else(|| default_compressed_path(&input));
+            prepare_output(&input, &output, force)?;
+            let started = Instant::now();
+            let options = CompressOptions {
+                target_chunk_size: chunk_size,
+                compression_level: level,
+            };
+            if input.is_dir() {
+                let report =
+                    compress_directory_bundle_with_progress(&input, &output, &options, |_| {})?;
+                println!("compressed  : {} files", report.files);
+                println!(
+                    "size        : {} -> {} ({:.1}%)",
+                    human_bytes(report.original_size),
+                    human_bytes(report.archive_size),
+                    report.archive_size as f64 / report.original_size.max(1) as f64 * 100.0
+                );
+                println!(
+                    "throughput  : {}",
+                    human_rate(report.original_size, started.elapsed())
+                );
+                println!("output      : {}", output.display());
+                return Ok(());
+            }
+            let stats = compress_file(&input, &output, &options)?;
+            let elapsed = started.elapsed();
+            println!(
+                "compressed  : {} -> {} ({:.1}%)",
+                human_bytes(stats.original_size),
+                human_bytes(stats.archive_size),
+                stats.ratio() * 100.0
+            );
+            println!(
+                "chunks      : {} ({} stored raw)",
+                stats.chunk_count, stats.raw_chunks
+            );
+            println!("throughput  : {}", human_rate(stats.original_size, elapsed));
+            println!("output      : {}", output.display());
+        }
+        Command::ZipCompress {
+            input,
+            output,
+            level,
+            force,
+        } => {
+            let output = output.unwrap_or_else(|| input.with_extension("zip"));
+            prepare_output(&input, &output, force)?;
+            let started = Instant::now();
+            let report = compress_zip_file(&input, &output, level)?;
+            let elapsed = started.elapsed();
+            println!("compressed  : {} entry", report.entries);
+            println!(
+                "size        : {} -> {} ({:.1}%)",
+                human_bytes(report.original_size),
+                human_bytes(report.archive_size),
+                report.archive_size as f64 / report.original_size.max(1) as f64 * 100.0
+            );
+            println!("method      : Deflate level {level}, Zip64 when required");
+            println!(
+                "throughput  : {}",
+                human_rate(report.original_size, elapsed)
+            );
+            println!("output      : {}", output.display());
+        }
+        Command::Decompress {
+            input,
+            output,
+            force,
+        } => {
+            let started = Instant::now();
+            if archive_kind(&input)? == CliArchiveKind::Zip {
+                let output = output.unwrap_or_else(|| default_zip_directory(&input));
+                ensure!(!output.exists(), "{} already exists", output.display());
+                let report = extract_zip_file(&input, &output)?;
+                println!("extracted   : {} entries", report.entries);
+                println!("size        : {}", human_bytes(report.uncompressed_size));
+                println!(
+                    "workers     : {} used / {} available (per entry)",
+                    report.worker_threads,
+                    rayon::current_num_threads()
+                );
+                println!(
+                    "throughput  : {}",
+                    human_rate(report.uncompressed_size, started.elapsed())
+                );
+                println!("output      : {}", output.display());
+            } else if archive_kind(&input)? == CliArchiveKind::Directory {
+                let output = output.unwrap_or_else(|| default_directory_output(&input));
+                ensure!(!output.exists(), "{} already exists", output.display());
+                let report = decompress_directory_bundle_with_progress(&input, &output, |_| {})?;
+                println!("extracted   : {} files", report.files);
+                println!("size        : {}", human_bytes(report.original_size));
+                println!(
+                    "workers     : {} used / {} available",
+                    report.worker_threads,
+                    rayon::current_num_threads()
+                );
+                println!(
+                    "throughput  : {}",
+                    human_rate(report.original_size, started.elapsed())
+                );
+                println!("checksum    : OK");
+                println!("output      : {}", output.display());
+            } else {
+                let output = output.unwrap_or_else(|| default_decompressed_path(&input));
+                prepare_output(&input, &output, force)?;
+                let report = decompress_file(&input, &output)?;
+                println!(
+                    "decompressed: {} -> {}",
+                    human_bytes(report.archive_size),
+                    human_bytes(report.original_size)
+                );
+                println!(
+                    "workers     : {} used / {} available",
+                    report.worker_threads,
+                    rayon::current_num_threads()
+                );
+                println!(
+                    "throughput  : {}",
+                    human_rate(report.original_size, started.elapsed())
+                );
+                println!("checksum    : OK");
+                println!("output      : {}", output.display());
+            }
+        }
+        Command::Verify { input } => {
+            let started = Instant::now();
+            if archive_kind(&input)? == CliArchiveKind::Zip {
+                let report = verify_zip_file(&input)?;
+                println!("archive     : {}", input.display());
+                println!("entries     : {}", report.entries);
+                println!("expanded    : {}", human_bytes(report.uncompressed_size));
+                println!("ZIP read    : OK ({:.3}s)", started.elapsed().as_secs_f64());
+                println!(
+                    "throughput  : {}",
+                    human_rate(report.uncompressed_size, started.elapsed())
+                );
+            } else if archive_kind(&input)? == CliArchiveKind::Directory {
+                let report = verify_directory_bundle_with_progress(&input, |_| {})?;
+                println!("archive     : {}", input.display());
+                println!("files       : {}", report.files);
+                println!("original    : {}", human_bytes(report.original_size));
+                println!("archive size: {}", human_bytes(report.archive_size));
+                println!("checksum    : OK ({:.3}s)", started.elapsed().as_secs_f64());
+            } else {
+                let report = verify_file(&input)?;
+                println!("archive     : {}", input.display());
+                println!("chunks      : {}", report.chunk_count);
+                println!("original    : {}", human_bytes(report.original_size));
+                println!("archive size: {}", human_bytes(report.archive_size));
+                println!("checksum    : OK ({:.3}s)", started.elapsed().as_secs_f64());
+            }
+        }
+        Command::Benchmark {
+            input,
+            iterations,
+            chunk_size,
+            level,
+        } => {
+            ensure!(iterations > 0, "--iterations must be greater than zero");
+            let source_size = fs::metadata(&input)?.len();
+            println!(
+                "input       : {} ({})",
+                input.display(),
+                human_bytes(source_size)
+            );
+            println!("iterations  : {iterations}");
+            let options = CompressOptions {
+                target_chunk_size: chunk_size,
+                compression_level: level,
+            };
+            let mut compress_time = Duration::ZERO;
+            let mut decompress_time = Duration::ZERO;
+            let mut final_stats = None;
+            let temp_base =
+                std::env::temp_dir().join(format!("fastener-benchmark-{}", std::process::id()));
+            let archive_path = temp_base.with_extension("fst");
+            let restored_path = temp_base.with_extension("restored");
+            let _ = fs::remove_file(&archive_path);
+            let _ = fs::remove_file(&restored_path);
+            let source_hash = hash_file(&input)?;
+            for _ in 0..iterations {
+                let started = Instant::now();
+                let stats = compress_file(&input, &archive_path, &options)?;
+                compress_time += started.elapsed();
+                let started = Instant::now();
+                decompress_file(&archive_path, &restored_path)?;
+                decompress_time += started.elapsed();
+                ensure!(
+                    hash_file(&restored_path)? == source_hash,
+                    "benchmark round-trip comparison failed"
+                );
+                final_stats = Some(stats);
+            }
+            let stats = final_stats.unwrap();
+            let average_compress = compress_time / iterations as u32;
+            let average_decompress = decompress_time / iterations as u32;
+            println!("chunks      : {}", stats.chunk_count);
+            println!(
+                "ratio       : {:.1}% ({})",
+                stats.ratio() * 100.0,
+                human_bytes(stats.archive_size)
+            );
+            println!(
+                "compress avg: {:.3}s, {}",
+                average_compress.as_secs_f64(),
+                human_rate(source_size, average_compress)
+            );
+            println!(
+                "decode avg  : {:.3}s, {}",
+                average_decompress.as_secs_f64(),
+                human_rate(source_size, average_decompress)
+            );
+            println!("round-trip  : OK");
+            let _ = fs::remove_file(archive_path);
+            let _ = fs::remove_file(restored_path);
+        }
+    }
+    Ok(())
+}
+
+fn prepare_output(input: &Path, path: &Path, force: bool) -> Result<()> {
+    validate_distinct(input, path)?;
+    if path.exists() && !force {
+        bail!(
+            "{} already exists (use --force to replace it)",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_distinct(input: &Path, output: &Path) -> Result<()> {
+    if input == output {
+        bail!("input and output paths must be different");
+    }
+    if input.exists() && output.exists() {
+        let input = fs::canonicalize(input)?;
+        let output = fs::canonicalize(output)?;
+        ensure!(input != output, "input and output resolve to the same file");
+    }
+    Ok(())
+}
+
+fn default_compressed_path(input: &Path) -> PathBuf {
+    let mut output = input.as_os_str().to_owned();
+    output.push(".fst");
+    PathBuf::from(output)
+}
+
+fn default_decompressed_path(input: &Path) -> PathBuf {
+    let base = if input
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("fst"))
+    {
+        input.with_extension("")
+    } else {
+        input.to_owned()
+    };
+    unique_output_path(&base, true)
+}
+
+fn default_zip_directory(input: &Path) -> PathBuf {
+    unique_output_path(&input.with_extension(""), false)
+}
+
+fn default_directory_output(input: &Path) -> PathBuf {
+    unique_output_path(&input.with_extension(""), false)
+}
+
+fn unique_output_path(base: &Path, preserve_extension: bool) -> PathBuf {
+    if !base.exists() {
+        return base.to_owned();
+    }
+    let parent = base.parent().unwrap_or_else(|| Path::new("."));
+    let stem = if preserve_extension {
+        base.file_stem().unwrap_or(base.as_os_str())
+    } else {
+        base.file_name().unwrap_or(base.as_os_str())
+    };
+    for suffix in 2.. {
+        let marker = format!(" ({suffix})");
+        let mut name = stem.to_owned();
+        name.push(marker);
+        let mut candidate = parent.join(name);
+        if preserve_extension && let Some(extension) = base.extension() {
+            candidate.set_extension(extension);
+        }
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CliArchiveKind {
+    File,
+    Directory,
+    Zip,
+}
+
+fn archive_kind(input: &Path) -> Result<CliArchiveKind> {
+    let mut file = File::open(input)?;
+    let mut magic = [0u8; 8];
+    let read = file.read(&mut magic)?;
+    if read == magic.len() && &magic == DIRECTORY_MAGIC {
+        return Ok(CliArchiveKind::Directory);
+    }
+    if read >= 4
+        && matches!(
+            &magic[..4],
+            [b'P', b'K', 3, 4] | [b'P', b'K', 5, 6] | [b'P', b'K', 7, 8]
+        )
+    {
+        return Ok(CliArchiveKind::Zip);
+    }
+    Ok(CliArchiveKind::File)
+}
+
+fn hash_file(path: &Path) -> Result<blake3::Hash> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0u8; 8 * 1024 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize())
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+fn human_rate(bytes: u64, elapsed: Duration) -> String {
+    if elapsed.is_zero() {
+        return "measuring".to_owned();
+    }
+    let bytes_per_second = bytes as f64 / elapsed.as_secs_f64();
+    let megabytes = bytes_per_second / 1_000_000.0;
+    let gigabytes = bytes_per_second / 1_000_000_000.0;
+    let megabits = bytes_per_second * 8.0 / 1_000_000.0;
+    let gigabits = bytes_per_second * 8.0 / 1_000_000_000.0;
+    format!("{megabytes:.2} MB/s | {gigabytes:.3} GB/s | {megabits:.1} Mbps | {gigabits:.3} Gbps")
+}

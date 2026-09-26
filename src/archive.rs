@@ -82,6 +82,10 @@ pub fn compress_bytes(data: &[u8], options: &CompressOptions) -> Result<(Vec<u8>
         options.target_chunk_size <= u32::MAX as usize / 2,
         "chunk size is too large"
     );
+    ensure!(
+        (0..=22).contains(&options.compression_level),
+        "compression level must be between 0 and 22"
+    );
     let analysis = analyze(data, options.target_chunk_size, data.len())?;
 
     let chunks: Result<Vec<_>> = analysis
@@ -236,6 +240,10 @@ pub(crate) fn parse_archive(archive: &[u8]) -> Result<ParsedArchive<'_>> {
     );
     let _target_chunk_size = take_u32(archive, &mut cursor)?;
     let whole_hash = take_array::<32>(archive, &mut cursor)?;
+    ensure!(
+        chunk_count <= (archive.len() - HEADER_LEN) / RECORD_LEN,
+        "truncated chunk records"
+    );
     let mut chunks = Vec::with_capacity(chunk_count);
     let mut expected_offset = 0usize;
 
@@ -245,6 +253,12 @@ pub(crate) fn parse_archive(archive: &[u8]) -> Result<ParsedArchive<'_>> {
         let original_len = take_u32(archive, &mut cursor)? as usize;
         let stored_len = take_u32(archive, &mut cursor)? as usize;
         let codec = take_u8(archive, &mut cursor)?;
+        ensure!(codec <= 2, "unsupported chunk codec {codec}");
+        ensure!(original_len > 0, "empty chunk is not allowed");
+        ensure!(
+            codec != 0 || stored_len == original_len,
+            "raw chunk has the wrong length"
+        );
         cursor = cursor.checked_add(3).context("archive offset overflow")?;
         ensure!(cursor <= archive.len(), "truncated chunk record");
         let checksum = take_array::<32>(archive, &mut cursor)?;
