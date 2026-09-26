@@ -1,16 +1,60 @@
-# Fastener
+# Fastener 1.2.3
 
-Fastener 1.0 is an open-source implementation of the `.fst` archive format. It uses
+Fastener 1.2.3 is an MIT-licensed open-source implementation of the `.fst` archive format. It uses
 content-aware chunking, CPU-parallel compression and decompression, automatic
-hybrid CPU/GPU boundary analysis, and checksums. For every non-empty input size,
+hybrid CPU/GPU boundary analysis, and checksums. When a segment needs boundary scoring,
 the CPU scores alternating samples while wgpu scores the other samples at the
 same time. The partial scores are merged before boundaries are selected. Any GPU
 initialization or command failure silently falls back to the full CPU scorer.
 
+## 日本語の説明・新機能
+
+1.2.3 writes decompressed single-file FST chunks directly into disjoint slices
+of a temporary mapped output. It hashes each bounded batch while its pages are
+still hot and publishes the file only after all chunk and whole-file checks pass.
+See [the large-file comparison](benchmarks/v1.2.3/REPORT.md). The FST format is unchanged.
+
+1.2.2 reuses Zstd workspaces across chunks during large FST file compression.
+Raw compressed-file chunks borrow the mapped input
+instead of making an extra copy. See [the large-file benchmark](benchmarks/v1.2.2/REPORT.md).
+For inputs of at least 128 MiB, whole-file hashing overlaps boundary analysis.
+The FST archive format is unchanged.
+
+1.2.1 parallelizes large recovery operations and reuses bounded buffers.
+See [the old/new comparison](benchmarks/v1.2.1/REPORT.md). Archive and sidecar formats are unchanged.
+
+- [工夫点と改善](docs/工夫点と改善.md): 独自の分割・並列化と、既存Zstd/LZ4を使う部分の区別。
+- [暗号化の使い方と仕様](docs/暗号化仕様.md): GUI/CLI、ファイル・フォルダーの認証付き暗号化。
+- [リカバリーレコード仕様](docs/リカバリーレコード案.md): 1.2.0で外部復旧ファイルの作成・修復を実装。
+
+1.2.0 adds optional Reed–Solomon sidecar recovery for FST, encrypted FST, folder
+archives and ZIP. Use the GUI's Create recovery data / Repair buttons, or:
+
+```powershell
+fastener recovery-create archive.fst --estimate
+fastener recovery-create archive.fst
+fastener repair archive.fst
+```
+
+Recovery is off unless explicitly requested. Keep `archive.fst.par` with the
+archive. Repair publishes a separate `.repaired.fst` only after whole-file and
+archive verification; encrypted repair also requires the correct password.
+Each group has 20 data and 2 parity shards. This is not a guarantee that arbitrary
+10% corruption can be repaired. Middle insertions/deletions are not resynchronized.
+See [the format](docs/RECOVERY_FORMAT.md) and [validation](benchmarks/v1.2.0/REPORT.md).
+
+1.1.1 reduces GPU input transfer to sampled bytes and parallelizes CPU scoring.
+See [the measured comparison](benchmarks/v1.1.1/REPORT.md).
+1.1.0 added optional Argon2id + XChaCha20-Poly1305 encryption for files and folders.
+The GUI has an encryption checkbox and masked password/confirmation fields.
+Encrypted extraction and verification are detected automatically and require a password.
+The new encrypted container has not received an independent security audit.
+Inputs smaller than 16 MiB now use only CPU scoring even with small target chunks.
+
 ## Windows GUI
 
 The release package includes `fastener-gui.exe`. It provides file and folder
-browsing and Compress, Decompress, and Verify buttons. Boundary analysis is
+browsing and Compress, Decompress, Verify, Create recovery data, and Repair buttons. Boundary analysis is
 always automatic; there is no hardware-selection setting to misconfigure.
 The GUI supports Japanese and English. It starts in Japanese when the Windows
 UI language is Japanese and in English otherwise; the language can be changed
@@ -47,11 +91,11 @@ fastener-gui.exe
 
 ## How it works
 
-1. The analyzer samples 4 KiB blocks and scores pattern changes. At every input
-   size, CPU and wgpu split the samples within each block and run concurrently.
+1. The analyzer samples 4 KiB blocks and scores pattern changes. When cuts are
+   needed, CPU and wgpu split the samples within each block and run concurrently.
    GPU failure transparently switches that segment to full CPU analysis.
 2. High-scoring positions near the target size become content-aware boundaries.
-3. Rayon compresses independent chunks in parallel. Fastener 1.0.0 applies the
+3. Rayon compresses independent chunks in parallel. Fastener applies the
    same content-aware hybrid boundaries to Fast (LZ4), Balanced (Zstd level 1),
    and Dense (Zstd level 12). Incompressible chunks are stored raw.
 4. FST decompression is chunk-parallel and verifies every chunk with BLAKE3.
@@ -59,14 +103,22 @@ fastener-gui.exe
 
 GPU analysis affects only where chunks are cut. Compression and decompression
 remain CPU-parallel, and archives never require a GPU. File commands use memory
-mapping and bounded 64 MiB work batches, so input size no longer determines
-heap-memory usage. On very small inputs, GPU initialization and transfer overhead
-can cost more time than the boundary scoring itself; hybrid use remains enabled
-to keep behavior independent of input size.
+mapping, 64 MiB analysis segments, and compression/decoding batches limited by
+both chunk count and a 256 MiB data budget. A single oversized archive chunk is
+decoded on its own and can exceed that budget; codec workspaces and mapped pages
+are additional memory costs. Segments at most twice the target chunk size require
+no cuts, so their scoring and GPU initialization are skipped without changing
+boundaries. Larger segments retain the automatic hybrid analysis.
+For files smaller than 16 MiB, any necessary scoring also runs entirely on the CPU.
 
 ## Build
 
-Requirements: Rust 1.85 or newer, a native C/C++ linker (Visual Studio Build
+Changes in the current release are recorded in [CHANGELOG.md](CHANGELOG.md).
+The historical 1.0.0 benchmark below is retained as a historical result; the
+1.0.2 comparison is linked in the debugging and performance section.
+
+Requirements: a Rust toolchain compatible with the locked dependencies (validated
+with Rust 1.96.1), a native C/C++ linker (Visual Studio Build
 Tools on the MSVC toolchain, or MinGW/LLVM on the GNU toolchain), and a platform
 supported by `wgpu`.
 
@@ -75,12 +127,24 @@ cargo build --release
 ```
 
 This builds both `fastener.exe` (CLI) and `fastener-gui.exe` (Windows GUI).
+On Windows, `./build-release.ps1` also removes the build user's home-directory
+prefix from Rust source paths embedded in the executables. Add `-Offline` when
+all locked dependencies are already cached.
 
 For a smaller CPU-only executable:
 
 ```console
 cargo build --release --no-default-features
 ```
+
+## OSS packages
+
+Run `./package-oss.ps1` after `./build-release.ps1` to create the versioned
+source-only ZIP and Windows ZIP in the parent directory. The Windows package
+includes the same source tree and the CLI/GUI executables under `bin/`.
+The source-only package contains no executables or build cache. Both contain
+the MIT license, tests, locked dependencies, release notes, benchmark evidence,
+and `SHA256SUMS.txt` for their contents. Dependency source code is not vendored.
 
 ## Commands
 
@@ -95,6 +159,11 @@ fastener compress large.bin -o large.fst --chunk-size 8388608
 fastener compress large.bin --level 0
 fastener compress large.bin --level 12
 
+# Encrypt a file or folder; the password is prompted without echo
+fastener compress documents --encrypt -o documents.fst
+fastener verify documents.fst
+fastener decompress documents.fst -o restored-documents
+
 # Create a conventional single-entry Deflate/Zip64 archive (level 1 by default)
 fastener zip-compress large.bin -o large.zip --level 1
 
@@ -104,7 +173,7 @@ fastener decompress large.fst -o large-restored.bin
 # Verify without creating an output file
 fastener verify large.fst
 
-# In-memory round-trip benchmark
+# File-based round-trip benchmark (includes filesystem I/O)
 fastener benchmark large.bin --iterations 5
 ```
 
@@ -199,7 +268,25 @@ cargo test --no-default-features
 ```
 
 The tests cover multi-chunk and empty round trips, corruption rejection,
-malformed input, boundary invariants, and the complete CLI workflow.
+malformed input, boundary invariants, and the complete CLI workflow. Regression
+tests also cover whole-file hash corruption (including empty archives), preserving
+existing output after failed decoding or interrupted FST/ZIP compression, bounded
+batches, invalid compression levels, and GPU scoring with unaligned input tails.
+
+## Debugging and performance update (2026-09-23)
+
+File verification and decompression now check the whole-file BLAKE3 digest as
+well as individual chunks. FST compression, file decompression, and ZIP creation
+write to a temporary sibling file and replace the requested output only after
+success. This does not make an entire directory or ZIP extraction transactional.
+
+GPU uploads no longer assemble every byte into a separate u32 staging array.
+Raw chunks are read directly from the archive mapping during file decoding and
+verification. Large whole-file hash updates use the existing Rayon worker pool.
+The archive format and content boundary algorithm are unchanged.
+
+The reproducible comparison and measured results are in
+[`benchmarks/debug-speed-2026-09-23/REPORT.md`](benchmarks/debug-speed-2026-09-23/REPORT.md).
 
 ## Current prototype limits
 
@@ -209,7 +296,9 @@ malformed input, boundary invariants, and the complete CLI workflow.
 - Level 0 chunks use LZ4. Levels 1 through 22 use Zstd at the selected level;
   automatic segmentation, parallel orchestration, and the verified container
   are Fastener's format-level additions.
-- Version 1 has no encryption, signatures, recovery records, or streaming index.
+- Encryption is optional and uses the separate FSTENC01 format. Older Fastener
+  versions cannot read it. There are no digital signatures, recovery records,
+  or random-access streaming index. Conventional ZIP output is not encrypted.
 - ZIP 10 GB/s and FST 100 GB/s are ceiling targets for sufficiently parallel,
   memory-resident workloads. They are not end-to-end guarantees: Deflate stream
   dependencies, file distribution, CPU, memory bandwidth, codec ratio, and
@@ -217,3 +306,4 @@ malformed input, boundary invariants, and the complete CLI workflow.
   throughput instead of presenting a target as a result.
 
 See [FORMAT.md](FORMAT.md) for the exact portable container layout.
+

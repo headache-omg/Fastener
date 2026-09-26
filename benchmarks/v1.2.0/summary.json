@@ -1,0 +1,42 @@
+[
+  {
+    "Case": "encrypted",
+    "ArchiveBytes": 1048775,
+    "RecoveryBytes": 132816,
+    "OverheadPercent": 12.663917427474912,
+    "CreateMs": 120.8842,
+    "RepairMs": 209.7435,
+    "CreatePeakWorkingSetMiB": 13.1171875,
+    "RepairPeakWorkingSetMiB": 76.68359375
+  },
+  {
+    "Case": "large",
+    "ArchiveBytes": 134218516,
+    "RecoveryBytes": 14690736,
+    "OverheadPercent": 10.945386998616495,
+    "CreateMs": 294.0176,
+    "RepairMs": 327.659,
+    "CreatePeakWorkingSetMiB": 33.6875,
+    "RepairPeakWorkingSetMiB": 140.109375
+  },
+  {
+    "Case": "small",
+    "ArchiveBytes": 1048688,
+    "RecoveryBytes": 132816,
+    "OverheadPercent": 12.664968036251011,
+    "CreateMs": 119.1902,
+    "RepairMs": 115.8314,
+    "CreatePeakWorkingSetMiB": 13.1796875,
+    "RepairPeakWorkingSetMiB": 13.921875
+  },
+  {
+    "Case": "tiny",
+    "ArchiveBytes": 160,
+    "RecoveryBytes": 9936,
+    "OverheadPercent": 6210.0,
+    "CreateMs": 112.7716,
+    "RepairMs": 113.4165,
+    "CreatePeakWorkingSetMiB": 12.0390625,
+    "RepairPeakWorkingSetMiB": 12.1484375
+  }
+]

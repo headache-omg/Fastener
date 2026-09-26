@@ -5,6 +5,10 @@ use fastener::{
     compress_zip_file, decompress_directory_bundle_with_progress, decompress_file,
     extract_zip_file, verify_directory_bundle_with_progress, verify_file, verify_zip_file,
 };
+use fastener::{
+    ENCRYPTED_MAGIC, compress_encrypted_with_progress, decompress_encrypted_with_progress,
+    encrypted_is_directory, verify_encrypted_with_progress,
+};
 use rayon::ThreadPoolBuilder;
 use std::{
     fs::{self, File},
@@ -12,6 +16,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 
 #[derive(Parser, Debug)]
 #[command(name = "fastener", version, about = "Parallel Fastener archiver")]
@@ -26,6 +31,29 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Create an optional .par recovery file for a finished FST or ZIP archive.
+    RecoveryCreate {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(short, long)]
+        force: bool,
+        /// Show exact additional storage without writing anything.
+        #[arg(long)]
+        estimate: bool,
+    },
+    /// Repair an archive using its .par file, then verify/authenticate it.
+    Repair {
+        input: PathBuf,
+        #[arg(long)]
+        recovery: Option<PathBuf>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(short, long)]
+        force: bool,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
     /// Compress one file into a .fst archive.
     Compress {
         input: PathBuf,
@@ -38,6 +66,12 @@ enum Command {
         level: i32,
         #[arg(short, long)]
         force: bool,
+        /// Encrypt the file/folder; prompts for a hidden password twice.
+        #[arg(long)]
+        encrypt: bool,
+        /// Read a UTF-8 password from a protected file instead of prompting.
+        #[arg(long, requires = "encrypt")]
+        password_file: Option<PathBuf>,
     },
     /// Compress one file into a conventional Deflate/Zip64 .zip archive.
     ZipCompress {
@@ -57,9 +91,15 @@ enum Command {
         output: Option<PathBuf>,
         #[arg(short, long)]
         force: bool,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
     },
     /// Fully decode an archive in memory and verify every checksum.
-    Verify { input: PathBuf },
+    Verify {
+        input: PathBuf,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+    },
     /// Measure compression and decompression on one input file.
     Benchmark {
         input: PathBuf,
@@ -91,12 +131,71 @@ fn run() -> Result<()> {
     }
 
     match cli.command {
+        Command::RecoveryCreate {
+            input,
+            output,
+            force,
+            estimate,
+        } => {
+            let plan = fastener::recovery_plan(fs::metadata(&input)?.len())?;
+            println!(
+                "additional  : {} bytes ({:.2}%)",
+                plan.recovery_bytes,
+                100.0 * plan.recovery_bytes as f64 / plan.original_bytes.max(1) as f64
+            );
+            println!(
+                "recovery    : 20 data + 2 parity, {} bytes/shard",
+                plan.shard_bytes
+            );
+            if !estimate {
+                let output = output.unwrap_or_else(|| fastener::recovery_path(&input));
+                prepare_output(&input, &output, force)?;
+                fastener::create_recovery_with_progress(&input, &output, |_| {})?;
+                println!("output      : {}", output.display());
+            }
+        }
+        Command::Repair {
+            input,
+            recovery,
+            output,
+            force,
+            password_file,
+        } => {
+            let recovery = recovery.unwrap_or_else(|| fastener::recovery_path(&input));
+            let info = fastener::recovery_info(&recovery)?;
+            ensure!(
+                info.encrypted || password_file.is_none(),
+                "--password-file requires an encrypted archive"
+            );
+            let password = if info.encrypted {
+                Some(read_password(password_file.as_deref(), false)?)
+            } else {
+                None
+            };
+            let output = output.unwrap_or_else(|| fastener::repaired_path(&input));
+            prepare_output(&input, &output, force)?;
+            let report = fastener::repair_with_progress(
+                &input,
+                &recovery,
+                &output,
+                password.as_ref().map(|p| p.as_slice()),
+                |_| {},
+            )?;
+            println!(
+                "repaired    : {} data shards; {} damaged parity shards",
+                report.repaired_shards, report.damaged_parity_shards
+            );
+            println!("validation  : whole-file hash and archive verification/authentication OK");
+            println!("output      : {}", output.display());
+        }
         Command::Compress {
             input,
             output,
             chunk_size,
             level,
             force,
+            encrypt,
+            password_file,
         } => {
             let output = output.unwrap_or_else(|| default_compressed_path(&input));
             prepare_output(&input, &output, force)?;
@@ -105,6 +204,22 @@ fn run() -> Result<()> {
                 target_chunk_size: chunk_size,
                 compression_level: level,
             };
+            if encrypt {
+                let password = read_password(password_file.as_deref(), true)?;
+                let report =
+                    compress_encrypted_with_progress(&input, &output, &options, &password, |_| {})?;
+                println!(
+                    "encrypted   : {} files, {} chunks",
+                    report.files, report.chunks
+                );
+                println!(
+                    "size        : {} -> {}",
+                    human_bytes(report.original_size),
+                    human_bytes(report.archive_size)
+                );
+                println!("output      : {}", output.display());
+                return Ok(());
+            }
             if input.is_dir() {
                 let report =
                     compress_directory_bundle_with_progress(&input, &output, &options, |_| {})?;
@@ -166,8 +281,36 @@ fn run() -> Result<()> {
             input,
             output,
             force,
+            password_file,
         } => {
             let started = Instant::now();
+            let kind = archive_kind(&input)?;
+            ensure!(
+                password_file.is_none() || kind == CliArchiveKind::Encrypted,
+                "--password-file is only supported for encrypted Fastener archives"
+            );
+            if kind == CliArchiveKind::Encrypted {
+                let directory = encrypted_is_directory(&input)?;
+                let output = output.unwrap_or_else(|| {
+                    if directory {
+                        default_directory_output(&input)
+                    } else {
+                        default_decompressed_path(&input)
+                    }
+                });
+                prepare_output(&input, &output, force)?;
+                let password = read_password(password_file.as_deref(), false)?;
+                let report =
+                    decompress_encrypted_with_progress(&input, &output, &password, |_| {})?;
+                println!(
+                    "decrypted   : {} files, {}",
+                    report.files,
+                    human_bytes(report.original_size)
+                );
+                println!("authentication: OK");
+                println!("output      : {}", output.display());
+                return Ok(());
+            }
             if archive_kind(&input)? == CliArchiveKind::Zip {
                 let output = output.unwrap_or_else(|| default_zip_directory(&input));
                 ensure!(!output.exists(), "{} already exists", output.display());
@@ -223,8 +366,27 @@ fn run() -> Result<()> {
                 println!("output      : {}", output.display());
             }
         }
-        Command::Verify { input } => {
+        Command::Verify {
+            input,
+            password_file,
+        } => {
             let started = Instant::now();
+            let kind = archive_kind(&input)?;
+            ensure!(
+                password_file.is_none() || kind == CliArchiveKind::Encrypted,
+                "--password-file is only supported for encrypted Fastener archives"
+            );
+            if kind == CliArchiveKind::Encrypted {
+                let password = read_password(password_file.as_deref(), false)?;
+                let report = verify_encrypted_with_progress(&input, &password, |_| {})?;
+                println!(
+                    "verified    : {} files, {}",
+                    report.files,
+                    human_bytes(report.original_size)
+                );
+                println!("authentication and checksum: OK");
+                return Ok(());
+            }
             if archive_kind(&input)? == CliArchiveKind::Zip {
                 let report = verify_zip_file(&input)?;
                 println!("archive     : {}", input.display());
@@ -272,12 +434,11 @@ fn run() -> Result<()> {
             let mut compress_time = Duration::ZERO;
             let mut decompress_time = Duration::ZERO;
             let mut final_stats = None;
-            let temp_base =
-                std::env::temp_dir().join(format!("fastener-benchmark-{}", std::process::id()));
-            let archive_path = temp_base.with_extension("fst");
-            let restored_path = temp_base.with_extension("restored");
-            let _ = fs::remove_file(&archive_path);
-            let _ = fs::remove_file(&restored_path);
+            let temporary = tempfile::Builder::new()
+                .prefix("fastener-benchmark-")
+                .tempdir()?;
+            let archive_path = temporary.path().join("archive.fst");
+            let restored_path = temporary.path().join("restored.bin");
             let source_hash = hash_file(&input)?;
             for _ in 0..iterations {
                 let started = Instant::now();
@@ -293,8 +454,8 @@ fn run() -> Result<()> {
                 final_stats = Some(stats);
             }
             let stats = final_stats.unwrap();
-            let average_compress = compress_time / iterations as u32;
-            let average_decompress = decompress_time / iterations as u32;
+            let average_compress = compress_time.div_f64(iterations as f64);
+            let average_decompress = decompress_time.div_f64(iterations as f64);
             println!("chunks      : {}", stats.chunk_count);
             println!(
                 "ratio       : {:.1}% ({})",
@@ -312,11 +473,50 @@ fn run() -> Result<()> {
                 human_rate(source_size, average_decompress)
             );
             println!("round-trip  : OK");
-            let _ = fs::remove_file(archive_path);
-            let _ = fs::remove_file(restored_path);
         }
     }
     Ok(())
+}
+
+fn read_password(file: Option<&Path>, confirm: bool) -> Result<Zeroizing<Vec<u8>>> {
+    let password = if let Some(path) = file {
+        let mut bytes = Zeroizing::new(Vec::new());
+        File::open(path)
+            .context("could not open password file")?
+            .take(1029)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 1028, "password file is too large");
+        if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            bytes.drain(..3);
+        }
+        if bytes.last() == Some(&b'\n') {
+            bytes.pop();
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+        }
+        std::str::from_utf8(&bytes).context("password file must be UTF-8")?;
+        ensure!(
+            !bytes.contains(&b'\n') && !bytes.contains(&b'\r'),
+            "password file must contain one line"
+        );
+        bytes
+    } else {
+        let first = Zeroizing::new(rpassword::prompt_password("パスワード / Password: ")?);
+        if confirm {
+            let second = Zeroizing::new(rpassword::prompt_password("確認 / Confirm password: ")?);
+            ensure!(
+                *first == *second,
+                "パスワードが一致しません / passwords do not match"
+            );
+        }
+        Zeroizing::new(first.as_bytes().to_vec())
+    };
+    ensure!(
+        !password.is_empty() && password.len() <= 1024,
+        "password must be 1-1024 UTF-8 bytes"
+    );
+    Ok(password)
 }
 
 fn prepare_output(input: &Path, path: &Path, force: bool) -> Result<()> {
@@ -398,12 +598,16 @@ enum CliArchiveKind {
     File,
     Directory,
     Zip,
+    Encrypted,
 }
 
 fn archive_kind(input: &Path) -> Result<CliArchiveKind> {
     let mut file = File::open(input)?;
     let mut magic = [0u8; 8];
     let read = file.read(&mut magic)?;
+    if read == magic.len() && &magic == ENCRYPTED_MAGIC {
+        return Ok(CliArchiveKind::Encrypted);
+    }
     if read == magic.len() && &magic == DIRECTORY_MAGIC {
         return Ok(CliArchiveKind::Directory);
     }

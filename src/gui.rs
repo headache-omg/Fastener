@@ -15,6 +15,10 @@ mod windows_app {
         extract_zip_file_with_progress, verify_directory_bundle_with_progress,
         verify_file_with_progress, verify_zip_file_with_progress,
     };
+    use fastener::{
+        ENCRYPTED_MAGIC, compress_encrypted_with_progress, decompress_encrypted_with_progress,
+        encrypted_is_directory, verify_encrypted_with_progress,
+    };
     use rayon::ThreadPoolBuilder;
     use std::{
         ffi::{OsString, c_void},
@@ -41,6 +45,7 @@ mod windows_app {
                         GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
                         OFN_PATHMUSTEXIST, OPENFILENAMEW,
                     },
+                    EM_SETLIMITTEXT,
                 },
                 Input::KeyboardAndMouse::EnableWindow,
                 Shell::{
@@ -52,6 +57,7 @@ mod windows_app {
         },
         core::{PCWSTR, PWSTR, w},
     };
+    use zeroize::Zeroizing;
 
     const ID_PATH: i32 = 100;
     const ID_BROWSE: i32 = 101;
@@ -68,6 +74,14 @@ mod windows_app {
     const ID_INPUT_LABEL: i32 = 115;
     const ID_MODE_LABEL: i32 = 116;
     const ID_RESULT_LABEL: i32 = 117;
+    const ID_ENCRYPT: i32 = 118;
+    const ID_PASSWORD: i32 = 119;
+    const ID_PASSWORD_CONFIRM: i32 = 120;
+    const ID_PASSWORD_LABEL: i32 = 121;
+    const ID_CONFIRM_LABEL: i32 = 122;
+    const ID_PASSWORD_HELP: i32 = 123;
+    const ID_RECOVERY_CREATE: i32 = 124;
+    const ID_REPAIR: i32 = 125;
     const WM_FASTENER_PROGRESS: u32 = WM_APP + 1;
     const WM_FASTENER_FINISHED: u32 = WM_APP + 2;
     const WM_FASTENER_LANGUAGE: u32 = WM_APP + 3;
@@ -167,7 +181,7 @@ mod windows_app {
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 760,
-                620,
+                680,
                 None,
                 None,
                 Some(instance),
@@ -216,6 +230,8 @@ mod windows_app {
                         ID_COMPRESS => start_operation(window, Operation::Compress),
                         ID_DECOMPRESS => start_operation(window, Operation::Decompress),
                         ID_VERIFY => start_operation(window, Operation::Verify),
+                        ID_RECOVERY_CREATE => start_operation(window, Operation::RecoveryCreate),
+                        ID_REPAIR => start_operation(window, Operation::Repair),
                         ID_LANG_JA => set_language(window, Language::Japanese),
                         ID_LANG_EN => set_language(window, Language::English),
                         _ => {}
@@ -420,10 +436,77 @@ mod windows_app {
 
             create(
                 w!("BUTTON"),
+                w!("圧縮時に暗号化"),
+                window_style(
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP,
+                    BS_AUTOCHECKBOX,
+                ),
+                24,
+                174,
+                225,
+                26,
+                parent,
+                ID_ENCRYPT,
+            );
+            create(
+                w!("STATIC"),
+                w!("暗号化書庫の解凍・検証にもパスワードが必要です"),
+                WS_CHILD | WS_VISIBLE,
+                260,
+                178,
+                465,
+                24,
+                parent,
+                ID_PASSWORD_HELP,
+            );
+            create(
+                w!("STATIC"),
+                w!("パスワード"),
+                WS_CHILD | WS_VISIBLE,
+                24,
+                208,
+                90,
+                24,
+                parent,
+                ID_PASSWORD_LABEL,
+            );
+            create(
+                w!("STATIC"),
+                w!("確認（圧縮時）"),
+                WS_CHILD | WS_VISIBLE,
+                390,
+                208,
+                105,
+                24,
+                parent,
+                ID_CONFIRM_LABEL,
+            );
+            for (id, x, width) in [(ID_PASSWORD, 120, 255), (ID_PASSWORD_CONFIRM, 500, 225)] {
+                create(
+                    w!("EDIT"),
+                    w!(""),
+                    window_style(
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER,
+                        ES_PASSWORD | ES_AUTOHSCROLL,
+                    ),
+                    x,
+                    204,
+                    width,
+                    26,
+                    parent,
+                    id,
+                );
+                if let Ok(edit) = GetDlgItem(Some(parent), id) {
+                    let _ =
+                        SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(1024)), Some(LPARAM(0)));
+                }
+            }
+            create(
+                w!("BUTTON"),
                 w!("圧縮"),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 24,
-                182,
+                244,
                 150,
                 42,
                 parent,
@@ -434,7 +517,7 @@ mod windows_app {
                 w!("解凍"),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 186,
-                182,
+                244,
                 150,
                 42,
                 parent,
@@ -445,7 +528,7 @@ mod windows_app {
                 w!("検証"),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 348,
-                182,
+                244,
                 150,
                 42,
                 parent,
@@ -456,7 +539,7 @@ mod windows_app {
                 w!("結果"),
                 WS_CHILD | WS_VISIBLE,
                 24,
-                244,
+                356,
                 680,
                 22,
                 parent,
@@ -464,21 +547,45 @@ mod windows_app {
             );
             create(
                 w!("EDIT"),
-                w!("Fastener 1.0"),
+                w!("Fastener 1.2.3"),
                 window_style(
                     WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL,
                     ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
                 ),
                 24,
-                270,
+                382,
                 701,
-                286,
+                236,
                 parent,
                 ID_STATUS,
             );
 
             let font = GetStockObject(DEFAULT_GUI_FONT);
+            create(
+                w!("BUTTON"),
+                w!("復旧データ作成"),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                24,
+                300,
+                240,
+                38,
+                parent,
+                ID_RECOVERY_CREATE,
+            );
+            create(
+                w!("BUTTON"),
+                w!("修復（.parが必要）"),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                280,
+                300,
+                240,
+                38,
+                parent,
+                ID_REPAIR,
+            );
             for id in [
+                ID_RECOVERY_CREATE,
+                ID_REPAIR,
                 ID_PATH,
                 ID_BROWSE,
                 ID_BROWSE_FOLDER,
@@ -494,6 +601,12 @@ mod windows_app {
                 ID_INPUT_LABEL,
                 ID_MODE_LABEL,
                 ID_RESULT_LABEL,
+                ID_ENCRYPT,
+                ID_PASSWORD,
+                ID_PASSWORD_CONFIRM,
+                ID_PASSWORD_LABEL,
+                ID_CONFIRM_LABEL,
+                ID_PASSWORD_HELP,
             ] {
                 if let Ok(control) = GetDlgItem(Some(parent), id) {
                     let _ = SendMessageW(
@@ -578,7 +691,17 @@ mod windows_app {
                 (ID_COMPRESS, "圧縮", "Compress"),
                 (ID_DECOMPRESS, "解凍", "Extract"),
                 (ID_VERIFY, "検証", "Verify"),
+                (ID_RECOVERY_CREATE, "復旧データ作成", "Create recovery data"),
+                (ID_REPAIR, "修復（.parが必要）", "Repair (requires .par)"),
                 (ID_RESULT_LABEL, "結果", "Result"),
+                (ID_ENCRYPT, "圧縮時に暗号化", "Encrypt on compression"),
+                (ID_PASSWORD_LABEL, "パスワード", "Password"),
+                (ID_CONFIRM_LABEL, "確認（圧縮時）", "Confirm (create)"),
+                (
+                    ID_PASSWORD_HELP,
+                    "暗号化書庫の解凍・検証にもパスワードが必要です",
+                    "Password required for encrypted archives.",
+                ),
             ] {
                 if let Ok(control) = GetDlgItem(Some(parent), id) {
                     set_text(control, text(language, japanese, english));
@@ -671,6 +794,8 @@ mod windows_app {
         Compress,
         Decompress,
         Verify,
+        RecoveryCreate,
+        Repair,
     }
 
     unsafe fn start_operation(parent: HWND, operation: Operation) {
@@ -678,7 +803,7 @@ mod windows_app {
             return;
         }
         let language = Language::current();
-        let prepared = (|| -> Result<(PathBuf, i32)> {
+        let prepared = (|| -> Result<_> {
             let path_text = unsafe { get_text(GetDlgItem(Some(parent), ID_PATH)?)? };
             ensure!(
                 !path_text.trim().is_empty(),
@@ -706,7 +831,74 @@ mod windows_app {
                 )
             );
             let compression_level = unsafe { selected_compression_level(parent) };
+            let encrypt = unsafe {
+                SendMessageW(
+                    GetDlgItem(Some(parent), ID_ENCRYPT)?,
+                    BM_GETCHECK,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(0)),
+                )
+                .0 == BST_CHECKED.0 as isize
+            };
+            let needs_password = if matches!(operation, Operation::Compress) {
+                encrypt
+            } else if matches!(operation, Operation::RecoveryCreate) {
+                false
+            } else if matches!(operation, Operation::Repair) {
+                fastener::recovery_info(&fastener::recovery_path(&input))?.encrypted
+            } else {
+                detect_archive_kind(&input, language)? == ArchiveKind::Encrypted
+            };
+            if matches!(operation, Operation::Compress) && !encrypt {
+                let value = unsafe { get_secret(GetDlgItem(Some(parent), ID_PASSWORD)?)? };
+                let confirmation =
+                    unsafe { get_secret(GetDlgItem(Some(parent), ID_PASSWORD_CONFIRM)?)? };
+                ensure!(
+                    value.is_empty() && confirmation.is_empty(),
+                    text(
+                        language,
+                        "パスワードを使う場合は「圧縮時に暗号化」にチェックしてください",
+                        "Select Encrypt on compression to use a password"
+                    )
+                );
+            }
+            let password = if needs_password {
+                let value = unsafe { get_secret(GetDlgItem(Some(parent), ID_PASSWORD)?)? };
+                ensure!(
+                    !value.is_empty() && value.len() <= 1024,
+                    text(
+                        language,
+                        "パスワードを入力してください（UTF-8で1024バイト以内）",
+                        "Enter a password (up to 1024 UTF-8 bytes)"
+                    )
+                );
+                if matches!(operation, Operation::Compress) {
+                    let confirm =
+                        unsafe { get_secret(GetDlgItem(Some(parent), ID_PASSWORD_CONFIRM)?)? };
+                    ensure!(
+                        *value == *confirm,
+                        text(
+                            language,
+                            "確認用パスワードが一致しません",
+                            "Passwords do not match"
+                        )
+                    );
+                }
+                Some(value)
+            } else {
+                None
+            };
             match operation {
+                Operation::RecoveryCreate => {
+                    unsafe {
+                        confirm_overwrite(parent, &fastener::recovery_path(&input), language)?
+                    };
+                }
+                Operation::Repair => {
+                    unsafe {
+                        confirm_overwrite(parent, &fastener::repaired_path(&input), language)?
+                    };
+                }
                 Operation::Compress if input.is_file() => {
                     unsafe { confirm_overwrite(parent, &compressed_path(&input), language)? };
                 }
@@ -720,10 +912,10 @@ mod windows_app {
                 }
                 _ => {}
             }
-            Ok((input, compression_level))
+            Ok((input, compression_level, password))
         })();
 
-        let (input, compression_level) = match prepared {
+        let (input, compression_level, password) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 unsafe {
@@ -742,6 +934,11 @@ mod windows_app {
             return;
         }
         unsafe {
+            for id in [ID_PASSWORD, ID_PASSWORD_CONFIRM] {
+                if let Ok(edit) = GetDlgItem(Some(parent), id) {
+                    set_text(edit, "");
+                }
+            }
             set_controls_enabled(parent, false);
             set_status(
                 parent,
@@ -755,7 +952,14 @@ mod windows_app {
         let parent_value = parent.0 as usize;
         thread::spawn(move || {
             let parent = HWND(parent_value as *mut c_void);
-            let result = perform_operation(parent, operation, input, compression_level, language);
+            let result = perform_operation(
+                parent,
+                operation,
+                input,
+                compression_level,
+                password,
+                language,
+            );
             let message = match result {
                 Ok(text) => UiMessage { text, error: false },
                 Err(error) => UiMessage {
@@ -772,10 +976,55 @@ mod windows_app {
         operation: Operation,
         input: PathBuf,
         compression_level: i32,
+        password: Option<Zeroizing<String>>,
         language: Language,
     ) -> Result<String> {
         let started = Instant::now();
+        if matches!(operation, Operation::RecoveryCreate | Operation::Repair) {
+            let output = if matches!(operation, Operation::RecoveryCreate) {
+                let output = fastener::recovery_path(&input);
+                let plan = fastener::recovery_plan(std::fs::metadata(&input)?.len())?;
+                let detail = format!(
+                    "{}: {} bytes ({:.2}%)",
+                    text(language, "追加容量", "Additional storage"),
+                    plan.recovery_bytes,
+                    plan.recovery_bytes as f64 * 100.0 / plan.original_bytes.max(1) as f64
+                );
+                fastener::create_recovery_with_progress(&input, &output, |info| {
+                    show_progress(parent, &detail, info, started, language)
+                })?;
+                output
+            } else {
+                let output = fastener::repaired_path(&input);
+                let detail = input.display().to_string();
+                fastener::repair_with_progress(
+                    &input,
+                    &fastener::recovery_path(&input),
+                    &output,
+                    password.as_ref().map(|p| p.as_bytes()),
+                    |info| show_progress(parent, &detail, info, started, language),
+                )?;
+                output
+            };
+            return Ok(format!(
+                "{}\r\n{}",
+                text(language, "完了しました", "Completed"),
+                output.display()
+            ));
+        }
+        if let Some(password) = password {
+            return perform_encrypted_operation(
+                parent,
+                operation,
+                &input,
+                compression_level,
+                &password,
+                started,
+                language,
+            );
+        }
         match operation {
+            Operation::RecoveryCreate | Operation::Repair => unreachable!(),
             Operation::Compress => {
                 if input.is_dir() {
                     compress_directory(parent, &input, compression_level, started, language)
@@ -874,7 +1123,7 @@ mod windows_app {
                         rate_labels(report.uncompressed_size, elapsed, language)
                     ))
                 }
-                ArchiveKind::Unknown => bail!(
+                ArchiveKind::Unknown | ArchiveKind::Encrypted => bail!(
                     "{}",
                     text(
                         language,
@@ -937,7 +1186,7 @@ mod windows_app {
                         rate_labels(report.uncompressed_size, elapsed, language)
                     ))
                 }
-                ArchiveKind::Unknown => bail!(
+                ArchiveKind::Unknown | ArchiveKind::Encrypted => bail!(
                     "{}",
                     text(
                         language,
@@ -947,6 +1196,97 @@ mod windows_app {
                 ),
             },
         }
+    }
+
+    fn perform_encrypted_operation(
+        parent: HWND,
+        operation: Operation,
+        input: &Path,
+        level: i32,
+        password: &str,
+        started: Instant,
+        language: Language,
+    ) -> Result<String> {
+        let detail = input.display().to_string();
+        let progress = |info| show_progress(parent, &detail, info, started, language);
+        let (report, output, label) = match operation {
+            Operation::RecoveryCreate | Operation::Repair => unreachable!(),
+            Operation::Compress => {
+                let output = if input.is_dir() {
+                    directory_archive_path(input)
+                } else {
+                    compressed_path(input)
+                };
+                let options = CompressOptions {
+                    compression_level: level,
+                    ..Default::default()
+                };
+                let report = compress_encrypted_with_progress(
+                    input,
+                    &output,
+                    &options,
+                    password.as_bytes(),
+                    progress,
+                )?;
+                (
+                    report,
+                    Some(output),
+                    text(
+                        language,
+                        "暗号化と圧縮が完了しました",
+                        "Encryption and compression completed",
+                    ),
+                )
+            }
+            Operation::Decompress => {
+                let output = if encrypted_is_directory(input)? {
+                    directory_bundle_output(input)
+                } else {
+                    restored_path(input)
+                };
+                let report = decompress_encrypted_with_progress(
+                    input,
+                    &output,
+                    password.as_bytes(),
+                    progress,
+                )?;
+                (
+                    report,
+                    Some(output),
+                    text(
+                        language,
+                        "復号・解凍・認証が完了しました",
+                        "Decryption, extraction and authentication completed",
+                    ),
+                )
+            }
+            Operation::Verify => {
+                let report = verify_encrypted_with_progress(input, password.as_bytes(), progress)?;
+                (
+                    report,
+                    None,
+                    text(
+                        language,
+                        "暗号化書庫の認証・チェックサム検証OK",
+                        "Encrypted archive authentication and checksums passed",
+                    ),
+                )
+            }
+        };
+        Ok(localized_format!(
+            language,
+            "{}\r\n\r\nファイル数: {}\r\n元サイズ: {}\r\n書庫サイズ: {}\r\nチャンク: {}\r\n時間: {:.3} 秒\r\n出力: {}",
+            "{}\r\n\r\nFiles: {}\r\nOriginal: {}\r\nArchive: {}\r\nChunks: {}\r\nTime: {:.3} seconds\r\nOutput: {}",
+            label,
+            report.files,
+            human_bytes(report.original_size),
+            human_bytes(report.archive_size),
+            report.chunks,
+            started.elapsed().as_secs_f64(),
+            output
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "—".to_owned())
+        ))
     }
 
     fn compress_directory(
@@ -1089,6 +1429,8 @@ mod windows_app {
 
     unsafe fn set_controls_enabled(parent: HWND, enabled: bool) {
         for id in [
+            ID_RECOVERY_CREATE,
+            ID_REPAIR,
             ID_PATH,
             ID_BROWSE,
             ID_BROWSE_FOLDER,
@@ -1100,6 +1442,9 @@ mod windows_app {
             ID_MODE_DENSE,
             ID_LANG_JA,
             ID_LANG_EN,
+            ID_ENCRYPT,
+            ID_PASSWORD,
+            ID_PASSWORD_CONFIRM,
         ] {
             if let Ok(control) = unsafe { GetDlgItem(Some(parent), id) } {
                 let _ = unsafe { EnableWindow(control, enabled) };
@@ -1119,6 +1464,8 @@ mod windows_app {
             ProgressPhase::ZipCompressing => ("ZIP圧縮", "ZIP compression"),
             ProgressPhase::ZipExtracting => ("ZIPエントリ並列展開", "Parallel ZIP extraction"),
             ProgressPhase::ZipVerifying => ("ZIPエントリ並列検証", "Parallel ZIP verification"),
+            ProgressPhase::RecoveryCreating => ("復旧データ作成", "Creating recovery data"),
+            ProgressPhase::RecoveryRepairing => ("書庫の修復", "Repairing archive"),
         };
         text(language, japanese, english)
     }
@@ -1194,6 +1541,15 @@ mod windows_app {
         }
     }
 
+    unsafe fn get_secret(control: HWND) -> Result<Zeroizing<String>> {
+        let length = unsafe { GetWindowTextLengthW(control) };
+        let mut buffer = Zeroizing::new(vec![0u16; length as usize + 1]);
+        let written = unsafe { GetWindowTextW(control, &mut buffer) };
+        Ok(Zeroizing::new(String::from_utf16(
+            &buffer[..written as usize],
+        )?))
+    }
+
     unsafe fn get_text(control: HWND) -> Result<String> {
         let length = unsafe { GetWindowTextLengthW(control) };
         let mut buffer = vec![0u16; length as usize + 1];
@@ -1227,6 +1583,7 @@ mod windows_app {
         Fastener,
         FastenerDirectory,
         Zip,
+        Encrypted,
         Unknown,
     }
 
@@ -1242,6 +1599,9 @@ mod windows_app {
             "書庫の形式を確認できません",
             "Could not identify the archive format",
         ))?;
+        if magic_len == magic.len() && &magic == ENCRYPTED_MAGIC {
+            return Ok(ArchiveKind::Encrypted);
+        }
         if magic_len == magic.len() && &magic == b"FASTENR1" {
             return Ok(ArchiveKind::Fastener);
         }
@@ -1333,6 +1693,131 @@ mod windows_app {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn masked_gui_controls_encrypt_decrypt_and_verify_with_real_worker() {
+            use windows::Win32::UI::Controls::EM_GETPASSWORDCHAR;
+            struct TestWindow(HWND);
+            impl Drop for TestWindow {
+                fn drop(&mut self) {
+                    unsafe {
+                        let _ = DestroyWindow(self.0);
+                    }
+                }
+            }
+            fn wait_for_worker(window: HWND) {
+                let deadline = Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    let mut message = MSG::default();
+                    if unsafe {
+                        PeekMessageW(
+                            &mut message,
+                            Some(window),
+                            WM_FASTENER_PROGRESS,
+                            WM_FASTENER_FINISHED,
+                            PM_REMOVE,
+                        )
+                    }
+                    .as_bool()
+                    {
+                        // Consume actual worker messages without opening a modal error dialog in a test.
+                        let payload = unsafe { Box::from_raw(message.lParam.0 as *mut UiMessage) };
+                        if message.message == WM_FASTENER_FINISHED {
+                            BUSY.store(false, Ordering::Release);
+                            unsafe {
+                                set_controls_enabled(window, true);
+                            }
+                            assert!(!payload.error, "{}", payload.text);
+                            return;
+                        }
+                    } else {
+                        assert!(Instant::now() < deadline, "GUI worker timed out");
+                        thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+            }
+            let temp = tempfile::tempdir().unwrap();
+            let input = temp.path().join("日本語-input.txt");
+            std::fs::write(&input, "GUI経由の暗号化テスト").unwrap();
+            unsafe {
+                // A real, hidden Win32 parent and controls; no desktop interaction required.
+                let window = TestWindow(
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE::default(),
+                        w!("STATIC"),
+                        w!("Fastener test"),
+                        WS_OVERLAPPEDWINDOW,
+                        0,
+                        0,
+                        760,
+                        680,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap(),
+                );
+                create_controls(window.0);
+                let password = GetDlgItem(Some(window.0), ID_PASSWORD).unwrap();
+                let confirm = GetDlgItem(Some(window.0), ID_PASSWORD_CONFIRM).unwrap();
+                assert_ne!(SendMessageW(password, EM_GETPASSWORDCHAR, None, None).0, 0);
+                assert_ne!(SendMessageW(confirm, EM_GETPASSWORDCHAR, None, None).0, 0);
+                set_text(
+                    GetDlgItem(Some(window.0), ID_PATH).unwrap(),
+                    input.to_str().unwrap(),
+                );
+                set_text(password, "GUI test passphrase");
+                set_text(confirm, "GUI test passphrase");
+                let _ = SendMessageW(
+                    GetDlgItem(Some(window.0), ID_ENCRYPT).unwrap(),
+                    BM_SETCHECK,
+                    Some(WPARAM(BST_CHECKED.0 as usize)),
+                    Some(LPARAM(0)),
+                );
+                start_operation(window.0, Operation::Compress);
+                assert!(BUSY.load(Ordering::Acquire));
+                assert_eq!(GetWindowTextLengthW(password), 0);
+                assert_eq!(GetWindowTextLengthW(confirm), 0);
+                wait_for_worker(window.0);
+                let archive = compressed_path(&input);
+                assert_eq!(
+                    detect_archive_kind(&archive, Language::English).unwrap(),
+                    ArchiveKind::Encrypted
+                );
+                let restored = restored_path(&archive);
+                set_text(
+                    GetDlgItem(Some(window.0), ID_PATH).unwrap(),
+                    archive.to_str().unwrap(),
+                );
+                set_text(password, "GUI test passphrase");
+                start_operation(window.0, Operation::Decompress);
+                wait_for_worker(window.0);
+                assert_eq!(
+                    std::fs::read(&restored).unwrap(),
+                    std::fs::read(&input).unwrap()
+                );
+                set_text(password, "GUI test passphrase");
+                start_operation(window.0, Operation::Verify);
+                wait_for_worker(window.0);
+                assert_eq!(GetWindowTextLengthW(password), 0);
+                start_operation(window.0, Operation::RecoveryCreate);
+                wait_for_worker(window.0);
+                assert!(fastener::recovery_path(&archive).exists());
+                let original = std::fs::read(&archive).unwrap();
+                let mut broken = original.clone();
+                broken[0] ^= 1;
+                std::fs::write(&archive, broken).unwrap();
+                set_text(password, "GUI test passphrase");
+                start_operation(window.0, Operation::Repair);
+                wait_for_worker(window.0);
+                assert_eq!(
+                    std::fs::read(fastener::repaired_path(&archive)).unwrap(),
+                    original
+                );
+                assert_eq!(GetWindowTextLengthW(password), 0);
+            }
+        }
 
         #[test]
         fn output_paths_do_not_replace_the_input() {

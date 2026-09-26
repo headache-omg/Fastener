@@ -1,0 +1,25 @@
+{
+  "Date": "2026-09-24",
+  "Fixtures": [
+    {
+      "Bytes": 268435456,
+      "Name": "mixed.bin",
+      "SHA256": "6BDDB0FB269CA67EE64A9FCF2C2B2B1A4DDA82E4CDA78C9CDAAD178EF017E1F6"
+    },
+    {
+      "Bytes": 134217728,
+      "Name": "random.bin",
+      "SHA256": "ECC7E89AE3B56A33D68BA75BA15639498192D90F0A21BC63CCD88830CB148B7B"
+    },
+    {
+      "Bytes": 1048576,
+      "Name": "small.bin",
+      "SHA256": "8F6597D0287E6872E9E7B9A450B81FA30CD9A4ECF591C5712B4666CE35FB36F1"
+    }
+  ],
+  "Iterations": 5,
+  "Threads": 15,
+  "ExampleSha256": "5DA56B6C2407E697BE498256E843B076C1FACDCB90942445D345269C4361370A",
+  "Scope": "Memory-only Zstd-1 boundary comparison; input IO excluded; restoration byte equality and BLAKE3 checked for every iteration",
+  "WarmupIterations": 1
+}

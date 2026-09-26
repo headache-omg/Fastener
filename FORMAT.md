@@ -67,3 +67,14 @@ components, duplicate paths, and symbolic links are rejected.
 
 Embedding independent file streams preserves per-file checksums and allows a
 damaged entry to be identified without changing the original file format.
+
+## Encrypted container (Fastener 1.1.0)
+
+Optional encrypted archives use the distinct magic `FSTENC01`, version 1,
+with Argon2id password derivation and XChaCha20-Poly1305 authenticated records.
+File names and whole-file checksums are encrypted as well as compressed data.
+The byte layout, authentication rules, limits, and password handling are specified
+in [暗号化仕様.md](docs/暗号化仕様.md). FASTENR1/FASTDIR1 remain unchanged.
+
+Optional recovery sidecars use a separate format: [FSTPAR01](docs/RECOVERY_FORMAT.md).
+
