@@ -1,9 +1,11 @@
 use fastener::{
-    CompressOptions, ProgressPhase, compress_bytes, compress_file_with_progress,
-    compress_zip_file_with_progress, decompress_file, verify_file,
+    CompressOptions, ProgressPhase, compress_bytes, compress_directory_bundle_with_progress,
+    compress_file_with_progress, compress_zip_file_with_progress,
+    decompress_directory_bundle_with_progress, decompress_file, extract_zip_file, verify_file,
 };
 use std::{
     fs,
+    io::Write,
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
@@ -108,4 +110,42 @@ fn cli_force_keeps_output_on_checksum_failure() {
         .unwrap();
     assert!(!result.status.success());
     assert_eq!(fs::read(&output).unwrap(), b"keep");
+}
+
+#[test]
+fn damaged_directory_archive_does_not_leave_partial_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("source");
+    let archive = temp.path().join("source.fst");
+    let output = temp.path().join("restored");
+    fs::create_dir(&input).unwrap();
+    fs::write(input.join("file.txt"), b"important data").unwrap();
+    compress_directory_bundle_with_progress(&input, &archive, &CompressOptions::default(), |_| {})
+        .unwrap();
+    let mut bytes = fs::read(&archive).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(&archive, bytes).unwrap();
+
+    assert!(decompress_directory_bundle_with_progress(&archive, &output, |_| {}).is_err());
+    assert!(!output.exists());
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2);
+}
+
+#[test]
+fn invalid_zip_does_not_leave_partial_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("bad.zip");
+    let output = temp.path().join("restored");
+    let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    writer.start_file("node", options).unwrap();
+    writer.write_all(b"file").unwrap();
+    writer.start_file("node/child", options).unwrap();
+    writer.write_all(b"child").unwrap();
+    writer.finish().unwrap();
+
+    assert!(extract_zip_file(&archive, &output).is_err());
+    assert!(!output.exists());
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
 }

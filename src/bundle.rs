@@ -155,7 +155,10 @@ pub fn decompress_directory_bundle_with_progress(
         .prefix(".fastener-extract-")
         .tempdir_in(parent)
         .context("could not create extraction workspace")?;
-    fs::create_dir_all(output_directory)?;
+    let staged_output = tempfile::Builder::new()
+        .prefix(".fastener-output-")
+        .tempdir_in(parent)
+        .context("could not create staged output directory")?;
     let mut seen = HashSet::with_capacity(entry_count);
     let mut completed_before = 0u64;
     let mut observed_files = 0usize;
@@ -165,7 +168,7 @@ pub fn decompress_directory_bundle_with_progress(
     for index in 0..entry_count {
         let entry = read_entry_header(&mut reader)?;
         ensure_unique_path(&entry.relative, &mut seen)?;
-        let destination = output_directory.join(&entry.relative);
+        let destination = staged_output.path().join(&entry.relative);
         if entry.kind == KIND_DIRECTORY {
             fs::create_dir_all(&destination)?;
             continue;
@@ -203,6 +206,14 @@ pub fn decompress_directory_bundle_with_progress(
         "directory expanded size mismatch"
     );
     ensure_reader_finished(&mut reader)?;
+    ensure!(
+        !output_directory.exists(),
+        "directory output already exists: {}",
+        output_directory.display()
+    );
+    fs::rename(staged_output.path(), output_directory)
+        .context("could not publish extracted directory")?;
+    let _ = staged_output.keep();
 
     Ok(DirectoryReport {
         entries: entry_count,

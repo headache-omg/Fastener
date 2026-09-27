@@ -462,12 +462,15 @@ pub fn extract_zip_file_with_progress(
     let metadata = read_zip_metadata(input)?;
     let uncompressed_size = metadata.iter().map(|entry| entry.size).sum();
     let workers = WorkerTracker::default();
-    fs::create_dir_all(output_directory).with_context(|| {
-        format!(
-            "could not create ZIP output directory {}",
-            output_directory.display()
-        )
-    })?;
+    let parent = output_directory
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let staged_output = tempfile::Builder::new()
+        .prefix(".fastener-zip-output-")
+        .tempdir_in(parent)
+        .context("could not create ZIP extraction workspace")?;
     run_parallel_progress(
         ProgressPhase::ZipExtracting,
         uncompressed_size,
@@ -482,11 +485,19 @@ pub fn extract_zip_file_with_progress(
                     let archive = archive
                         .as_mut()
                         .map_err(|error| anyhow!("could not open ZIP worker: {error:#}"))?;
-                    extract_zip_entry(archive, meta, output_directory, completed)
+                    extract_zip_entry(archive, meta, staged_output.path(), completed)
                 },
             )
         },
     )?;
+    ensure!(
+        !output_directory.exists(),
+        "ZIP output directory already exists: {}",
+        output_directory.display()
+    );
+    fs::rename(staged_output.path(), output_directory)
+        .context("could not publish ZIP output directory")?;
+    let _ = staged_output.keep();
     Ok(ZipReport {
         entries: metadata.len(),
         uncompressed_size,

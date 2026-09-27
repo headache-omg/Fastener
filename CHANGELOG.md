@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Extract ZIP and Fastener directory archives into temporary sibling directories,
+  then publish only after every entry validates. Failed extraction no longer leaves
+  partial output directories behind.
+
 ## 1.2.3 — 2026-09-26
 
 - Decode ordinary single-file FST chunks directly into nonoverlapping regions
