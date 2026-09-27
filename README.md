@@ -49,6 +49,8 @@ See [the measured comparison](benchmarks/v1.1.1/REPORT.md).
 The GUI has an encryption checkbox and masked password/confirmation fields.
 Encrypted extraction and verification are detected automatically and require a password.
 The new encrypted container has not received an independent security audit.
+See [the 2026-09-27 internal security review](docs/セキュリティ点検-2026-09-27.md)
+for the reviewed scope, a resource-limit fix, and remaining limitations.
 Inputs smaller than 16 MiB now use only CPU scoring even with small target chunks.
 
 ## Windows GUI
@@ -308,6 +310,10 @@ The reproducible comparison and measured results are in
   versions cannot read it. There are no digital signatures or random-access
   streaming index. Separate recovery sidecars are available. Conventional ZIP
   output is not encrypted.
+- Encrypted verification/extraction defaults to a 64 GiB expanded-size limit.
+  For a larger trusted archive, use `--encrypted-max-output-bytes BYTES` with
+  `verify`, `decompress`, or encrypted `repair`. Authentication alone does not
+  prevent a password holder from creating a compression bomb.
 - ZIP 10 GB/s and FST 100 GB/s are ceiling targets for sufficiently parallel,
   memory-resident workloads. They are not end-to-end guarantees: Deflate stream
   dependencies, file distribution, CPU, memory bandwidth, codec ratio, and

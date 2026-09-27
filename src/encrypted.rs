@@ -24,6 +24,7 @@ const MAX_CHUNK: usize = 16 * 1024 * 1024;
 const MAX_FRAME: usize = MAX_CHUNK + 64;
 const MAX_MANIFEST: usize = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 100_000;
+const MAX_EXPANDED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const FRAME_BATCH: usize = 8;
 const AUTH_ERROR: &str =
     "認証失敗: パスワードが違うか、書庫が破損・改変されています (authentication failed)";
@@ -35,6 +36,21 @@ pub struct EncryptedReport {
     pub files: usize,
     pub chunks: usize,
     pub is_directory: bool,
+}
+
+/// Resource limit for an authenticated but potentially untrusted archive.
+/// Raise this explicitly when reading a larger trusted archive.
+#[derive(Clone, Copy, Debug)]
+pub struct EncryptedLimits {
+    pub max_output_bytes: u64,
+}
+
+impl Default for EncryptedLimits {
+    fn default() -> Self {
+        Self {
+            max_output_bytes: MAX_EXPANDED_BYTES,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -621,6 +637,7 @@ fn process_encrypted(
     input: &Path,
     output: Option<&Path>,
     password: &[u8],
+    limits: EncryptedLimits,
     mut progress: impl FnMut(ProgressInfo),
 ) -> Result<EncryptedReport> {
     if let Some(output) = output {
@@ -637,6 +654,10 @@ fn process_encrypted(
         read_frame(&mut reader)?.context("missing encrypted manifest")?,
     )?;
     let (entries, total) = decode_manifest(&manifest, directory)?;
+    ensure!(
+        total <= limits.max_output_bytes,
+        "encrypted archive exceeds the expanded-size limit"
+    );
     let staged = output
         .map(|path| Staged::new(path, directory))
         .transpose()?;
@@ -724,7 +745,23 @@ pub fn decompress_encrypted_with_progress(
     password: &[u8],
     progress: impl FnMut(ProgressInfo),
 ) -> Result<EncryptedReport> {
-    process_encrypted(input, Some(output), password, progress)
+    decompress_encrypted_with_limits_and_progress(
+        input,
+        output,
+        password,
+        EncryptedLimits::default(),
+        progress,
+    )
+}
+
+pub fn decompress_encrypted_with_limits_and_progress(
+    input: &Path,
+    output: &Path,
+    password: &[u8],
+    limits: EncryptedLimits,
+    progress: impl FnMut(ProgressInfo),
+) -> Result<EncryptedReport> {
+    process_encrypted(input, Some(output), password, limits, progress)
 }
 
 /// Verification never creates plaintext files on disk.
@@ -733,7 +770,16 @@ pub fn verify_encrypted_with_progress(
     password: &[u8],
     progress: impl FnMut(ProgressInfo),
 ) -> Result<EncryptedReport> {
-    process_encrypted(input, None, password, progress)
+    verify_encrypted_with_limits_and_progress(input, password, EncryptedLimits::default(), progress)
+}
+
+pub fn verify_encrypted_with_limits_and_progress(
+    input: &Path,
+    password: &[u8],
+    limits: EncryptedLimits,
+    progress: impl FnMut(ProgressInfo),
+) -> Result<EncryptedReport> {
+    process_encrypted(input, None, password, limits, progress)
 }
 
 #[cfg(test)]

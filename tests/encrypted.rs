@@ -1,7 +1,7 @@
 use fastener::{
-    CompressOptions, ENCRYPTED_MAGIC, compress_encrypted_with_progress as compress,
-    decompress_encrypted_with_progress as decompress, encrypted_is_directory,
-    verify_encrypted_with_progress as verify,
+    CompressOptions, ENCRYPTED_MAGIC, EncryptedLimits,
+    compress_encrypted_with_progress as compress, decompress_encrypted_with_progress as decompress,
+    encrypted_is_directory, verify_encrypted_with_progress as verify,
 };
 use std::{fs, path::Path, process::Command};
 
@@ -96,6 +96,74 @@ fn encrypted_empty_file_and_empty_directory_round_trip() {
             assert!(fs::read(output).unwrap().is_empty());
         }
     }
+}
+
+#[test]
+fn expanded_size_limit_rejects_before_creating_plaintext_and_can_be_overridden() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("input");
+    let archive = temp.path().join("archive.fst");
+    let output = temp.path().join("output");
+    fs::write(&input, vec![0u8; 128 * 1024]).unwrap();
+    compress(&input, &archive, &options(1), PASSWORD, |_| {}).unwrap();
+    let small = EncryptedLimits {
+        max_output_bytes: 1024,
+    };
+    assert!(
+        fastener::verify_encrypted_with_limits_and_progress(&archive, PASSWORD, small, |_| {})
+            .is_err()
+    );
+    assert!(
+        fastener::decompress_encrypted_with_limits_and_progress(
+            &archive,
+            &output,
+            PASSWORD,
+            small,
+            |_| {}
+        )
+        .is_err()
+    );
+    assert!(!output.exists());
+    let large = EncryptedLimits {
+        max_output_bytes: 128 * 1024,
+    };
+    fastener::verify_encrypted_with_limits_and_progress(&archive, PASSWORD, large, |_| {}).unwrap();
+    fastener::decompress_encrypted_with_limits_and_progress(
+        &archive,
+        &output,
+        PASSWORD,
+        large,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(fs::metadata(output).unwrap().len(), 128 * 1024);
+
+    let password_file = temp.path().join("password.txt");
+    fs::write(&password_file, PASSWORD).unwrap();
+    let binary = env!("CARGO_BIN_EXE_fastener");
+    let limited = Command::new(binary)
+        .arg("verify")
+        .arg(&archive)
+        .arg("--password-file")
+        .arg(&password_file)
+        .arg("--encrypted-max-output-bytes")
+        .arg("1024")
+        .output()
+        .unwrap();
+    assert!(!limited.status.success());
+    assert!(String::from_utf8_lossy(&limited.stderr).contains("expanded-size limit"));
+    assert!(
+        Command::new(binary)
+            .arg("verify")
+            .arg(&archive)
+            .arg("--password-file")
+            .arg(&password_file)
+            .arg("--encrypted-max-output-bytes")
+            .arg("131072")
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 #[test]

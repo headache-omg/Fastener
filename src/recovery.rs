@@ -403,6 +403,26 @@ pub fn repair_with_zip_limits_and_progress(
     output: &Path,
     password: Option<&[u8]>,
     zip_limits: crate::ZipLimits,
+    callback: impl FnMut(ProgressInfo),
+) -> Result<RecoveryReport> {
+    repair_with_archive_limits_and_progress(
+        input,
+        recovery,
+        output,
+        password,
+        zip_limits,
+        crate::EncryptedLimits::default(),
+        callback,
+    )
+}
+
+pub fn repair_with_archive_limits_and_progress(
+    input: &Path,
+    recovery: &Path,
+    output: &Path,
+    password: Option<&[u8]>,
+    zip_limits: crate::ZipLimits,
+    encrypted_limits: crate::EncryptedLimits,
     mut callback: impl FnMut(ProgressInfo),
 ) -> Result<RecoveryReport> {
     distinct(input, output)?;
@@ -521,9 +541,10 @@ pub fn repair_with_zip_limits_and_progress(
             )?;
         }
         3 => {
-            crate::verify_encrypted_with_progress(
+            crate::verify_encrypted_with_limits_and_progress(
                 temporary.path(),
                 password.unwrap(),
+                encrypted_limits,
                 &mut callback,
             )?;
         }

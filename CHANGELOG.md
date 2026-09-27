@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Limit encrypted archive verification/extraction to 64 GiB of declared output
+  by default, before staging plaintext, with an explicit CLI/library override.
+  Apply the same limit during encrypted recovery validation.
 - Bound FASTDIR1 entry counts by a 100,000-entry limit and physical archive size
   before allocation; reject FST chunks exceeding 64 MiB decoded size.
 - Reuse encrypted archive path checks for directory and ZIP names, including
