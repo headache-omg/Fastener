@@ -1,11 +1,12 @@
 use crate::{
     CompressOptions, ProgressInfo, compress_file_with_progress, decompress_file_with_progress,
+    path_safety::{MAX_ENTRY_PATH, safe_path},
     verify_file_with_progress,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::HashSet,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, BufReader, BufWriter, Read, Seek, Write},
     path::{Component, Path, PathBuf},
 };
@@ -14,6 +15,9 @@ pub const DIRECTORY_MAGIC: &[u8; 8] = b"FASTDIR1";
 const DIRECTORY_VERSION: u16 = 1;
 const KIND_FILE: u8 = 0;
 const KIND_DIRECTORY: u8 = 1;
+const HEADER_LEN: u64 = 28;
+const MIN_ENTRY_LEN: u64 = 25;
+const MAX_ENTRIES: usize = 100_000;
 
 #[derive(Clone, Debug)]
 pub struct DirectoryReport {
@@ -57,11 +61,7 @@ pub fn compress_directory_bundle_with_progress(
     let original_size = entries
         .iter()
         .fold(0u64, |total, entry| total.saturating_add(entry.size));
-    ensure!(
-        entries.len() <= u32::MAX as usize,
-        "too many directory entries"
-    );
-    ensure!(files <= u32::MAX as usize, "too many files");
+    ensure!(entries.len() <= MAX_ENTRIES, "too many directory entries");
 
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
@@ -69,14 +69,13 @@ pub fn compress_directory_bundle_with_progress(
         .prefix(".fastener-bundle-")
         .tempdir_in(parent)
         .context("could not create bundle workspace")?;
-    let output_file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(output)
-        .with_context(|| format!("could not create directory archive {}", output.display()))?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(".fastener-bundle-output-")
+        .tempfile_in(parent)
+        .context("could not create staged directory archive")?;
 
     let result = (|| -> Result<u64> {
-        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, output_file);
+        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, staged.as_file_mut());
         write_bundle_header(
             &mut writer,
             entries.len() as u32,
@@ -119,20 +118,18 @@ pub fn compress_directory_bundle_with_progress(
         Ok(writer.stream_position()?)
     })();
 
-    match result {
-        Ok(archive_size) => Ok(DirectoryReport {
-            entries: entries.len(),
-            files,
-            original_size,
-            archive_size,
-            output: Some(output.to_owned()),
-            worker_threads: rayon::current_num_threads().min(files),
-        }),
-        Err(error) => {
-            let _ = fs::remove_file(output);
-            Err(error)
-        }
-    }
+    let archive_size = result?;
+    staged
+        .persist_noclobber(output)
+        .context("could not publish directory archive")?;
+    Ok(DirectoryReport {
+        entries: entries.len(),
+        files,
+        original_size,
+        archive_size,
+        output: Some(output.to_owned()),
+        worker_threads: rayon::current_num_threads().min(files),
+    })
 }
 
 pub fn decompress_directory_bundle_with_progress(
@@ -149,7 +146,7 @@ pub fn decompress_directory_bundle_with_progress(
         .with_context(|| format!("could not open directory archive {}", input.display()))?;
     let archive_size = input_file.metadata()?.len();
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, input_file);
-    let (entry_count, file_count, original_size) = read_bundle_header(&mut reader)?;
+    let (entry_count, file_count, original_size) = read_bundle_header(&mut reader, archive_size)?;
     let parent = output_directory.parent().unwrap_or_else(|| Path::new("."));
     let temporary = tempfile::Builder::new()
         .prefix(".fastener-extract-")
@@ -233,7 +230,7 @@ pub fn verify_directory_bundle_with_progress(
         .with_context(|| format!("could not open directory archive {}", input.display()))?;
     let archive_size = input_file.metadata()?.len();
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, input_file);
-    let (entry_count, file_count, original_size) = read_bundle_header(&mut reader)?;
+    let (entry_count, file_count, original_size) = read_bundle_header(&mut reader, archive_size)?;
     let parent = input.parent().unwrap_or_else(|| Path::new("."));
     let temporary = tempfile::Builder::new()
         .prefix(".fastener-verify-")
@@ -323,6 +320,7 @@ fn collect_entries(root: &Path) -> Result<Vec<SourceEntry>> {
                     size,
                 });
             }
+            ensure!(entries.len() <= MAX_ENTRIES, "too many directory entries");
         }
     }
     entries.sort_by(|left, right| left.relative.cmp(&right.relative));
@@ -330,31 +328,24 @@ fn collect_entries(root: &Path) -> Result<Vec<SourceEntry>> {
 }
 
 fn encode_relative_path(path: &Path) -> Result<Vec<u8>> {
-    validate_relative_path(path)?;
-    let encoded = path.to_string_lossy().replace('\\', "/").into_bytes();
-    ensure!(!encoded.is_empty(), "empty directory entry path");
-    ensure!(
-        encoded.len() <= u32::MAX as usize,
-        "directory path is too long"
-    );
-    Ok(encoded)
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let Component::Normal(part) = component else {
+            bail!("unsafe directory entry path");
+        };
+        parts.push(part.to_str().context("directory path is not UTF-8")?);
+    }
+    let encoded = parts.join("/");
+    safe_path(&encoded)?;
+    Ok(encoded.into_bytes())
 }
 
 fn decode_relative_path(encoded: Vec<u8>) -> Result<PathBuf> {
     let text = String::from_utf8(encoded).context("directory path is not UTF-8")?;
-    let path = PathBuf::from(text.replace('/', std::path::MAIN_SEPARATOR_STR));
-    validate_relative_path(&path)?;
-    Ok(path)
-}
-
-fn validate_relative_path(path: &Path) -> Result<()> {
-    ensure!(!path.as_os_str().is_empty(), "empty directory entry path");
-    ensure!(
-        path.components()
-            .all(|component| matches!(component, Component::Normal(_))),
-        "unsafe directory entry path"
-    );
-    Ok(())
+    safe_path(&text)?;
+    Ok(PathBuf::from(
+        text.replace('/', std::path::MAIN_SEPARATOR_STR),
+    ))
 }
 
 fn ensure_unique_path(path: &Path, seen: &mut HashSet<String>) -> Result<()> {
@@ -378,7 +369,8 @@ fn write_bundle_header(
     Ok(())
 }
 
-fn read_bundle_header(reader: &mut impl Read) -> Result<(usize, usize, u64)> {
+fn read_bundle_header(reader: &mut impl Read, archive_size: u64) -> Result<(usize, usize, u64)> {
+    ensure!(archive_size >= HEADER_LEN, "truncated directory header");
     let mut magic = [0u8; 8];
     reader.read_exact(&mut magic)?;
     ensure!(
@@ -390,10 +382,16 @@ fn read_bundle_header(reader: &mut impl Read) -> Result<(usize, usize, u64)> {
         version == DIRECTORY_VERSION,
         "unsupported directory archive version"
     );
-    let _flags = read_u16(reader)?;
+    let flags = read_u16(reader)?;
+    ensure!(flags == 0, "unsupported directory archive flags");
     let entries = read_u32(reader)? as usize;
     let files = read_u32(reader)? as usize;
     let original_size = read_u64(reader)?;
+    ensure!(entries <= MAX_ENTRIES, "unreasonable directory entry count");
+    ensure!(
+        entries as u64 <= (archive_size - HEADER_LEN) / MIN_ENTRY_LEN,
+        "directory entry count exceeds archive size"
+    );
     ensure!(files <= entries, "invalid directory archive counts");
     Ok((entries, files, original_size))
 }
@@ -419,7 +417,7 @@ fn read_entry_header(reader: &mut impl Read) -> Result<BundleEntry> {
     ensure!(kind[1..] == [0, 0, 0], "invalid directory entry flags");
     let path_len = read_u32(reader)? as usize;
     ensure!(
-        path_len > 0 && path_len <= 1024 * 1024,
+        path_len > 0 && path_len <= MAX_ENTRY_PATH,
         "invalid directory path length"
     );
     let original_size = read_u64(reader)?;

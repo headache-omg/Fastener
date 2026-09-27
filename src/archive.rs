@@ -7,6 +7,8 @@ pub(crate) const VERSION: u16 = 1;
 pub(crate) const HEADER_LEN: usize = 8 + 2 + 2 + 8 + 4 + 4 + 32;
 pub(crate) const RECORD_LEN: usize = 8 + 4 + 4 + 1 + 3 + 32;
 pub(crate) const MAX_CHUNKS: usize = 1_000_000;
+/// The file encoder analyzes at most one 64 MiB segment at a time.
+pub(crate) const MAX_DECODED_CHUNK: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct CompressOptions {
@@ -87,6 +89,13 @@ pub fn compress_bytes(data: &[u8], options: &CompressOptions) -> Result<(Vec<u8>
         "compression level must be between 0 and 22"
     );
     let analysis = analyze(data, options.target_chunk_size, data.len())?;
+    ensure!(
+        analysis
+            .boundaries
+            .windows(2)
+            .all(|range| range[1] - range[0] <= MAX_DECODED_CHUNK),
+        "chunk exceeds the 64 MiB format limit"
+    );
 
     let chunks: Result<Vec<_>> = analysis
         .boundaries
@@ -229,7 +238,8 @@ pub(crate) fn parse_archive(archive: &[u8]) -> Result<ParsedArchive<'_>> {
     let mut cursor = 8;
     let version = take_u16(archive, &mut cursor)?;
     ensure!(version == VERSION, "unsupported Fastener version {version}");
-    let _flags = take_u16(archive, &mut cursor)?;
+    let flags = take_u16(archive, &mut cursor)?;
+    ensure!(flags == 0, "unsupported Fastener archive flags");
     let original_size_u64 = take_u64(archive, &mut cursor)?;
     let original_size =
         usize::try_from(original_size_u64).context("original size does not fit this platform")?;
@@ -251,6 +261,10 @@ pub(crate) fn parse_archive(archive: &[u8]) -> Result<ParsedArchive<'_>> {
         let offset = usize::try_from(take_u64(archive, &mut cursor)?)
             .context("chunk offset does not fit this platform")?;
         let original_len = take_u32(archive, &mut cursor)? as usize;
+        ensure!(
+            original_len <= MAX_DECODED_CHUNK,
+            "decoded chunk exceeds the 64 MiB limit"
+        );
         let stored_len = take_u32(archive, &mut cursor)? as usize;
         let codec = take_u8(archive, &mut cursor)?;
         ensure!(codec <= 2, "unsupported chunk codec {codec}");
@@ -259,8 +273,12 @@ pub(crate) fn parse_archive(archive: &[u8]) -> Result<ParsedArchive<'_>> {
             codec != 0 || stored_len == original_len,
             "raw chunk has the wrong length"
         );
-        cursor = cursor.checked_add(3).context("archive offset overflow")?;
-        ensure!(cursor <= archive.len(), "truncated chunk record");
+        let reserved_end = cursor.checked_add(3).context("archive offset overflow")?;
+        ensure!(
+            archive.get(cursor..reserved_end) == Some(&[0, 0, 0][..]),
+            "invalid chunk flags or truncated record"
+        );
+        cursor = reserved_end;
         let checksum = take_array::<32>(archive, &mut cursor)?;
         ensure!(
             offset == expected_offset,
@@ -385,5 +403,11 @@ mod tests {
     #[test]
     fn malformed_archive_is_rejected() {
         assert!(decompress_bytes(b"not an archive").is_err());
+        let (mut archive, _) = compress_bytes(b"contents", &CompressOptions::default()).unwrap();
+        archive[10] = 1;
+        assert!(inspect_archive(&archive).is_err());
+        archive[10] = 0;
+        archive[77] = 1;
+        assert!(inspect_archive(&archive).is_err());
     }
 }

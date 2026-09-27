@@ -1,5 +1,7 @@
 //! Versioned, authenticated chunk archives. See docs/暗号化仕様.md.
-use crate::{CompressOptions, ProgressInfo, ProgressPhase, analyzer::analyze};
+use crate::{
+    CompressOptions, ProgressInfo, ProgressPhase, analyzer::analyze, path_safety::safe_path,
+};
 use anyhow::{Context, Result, bail, ensure};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -136,47 +138,6 @@ fn read_header(reader: &mut impl Read) -> Result<[u8; HEADER_LEN]> {
 /// A routing hint only. The header is authenticated when the password is used.
 pub fn encrypted_is_directory(input: &Path) -> Result<bool> {
     Ok(read_header(&mut File::open(input)?)?[10] == 1)
-}
-
-fn safe_path(path: &str) -> Result<()> {
-    ensure!(
-        !path.is_empty() && path.len() <= 4096,
-        "invalid encrypted entry path length"
-    );
-    for part in path.split('/') {
-        ensure!(
-            !part.is_empty()
-                && part != "."
-                && part != ".."
-                && !part.ends_with(['.', ' '])
-                && !part
-                    .chars()
-                    .any(|c| c.is_control() || "\\:<>\"|?*".contains(c)),
-            "unsafe encrypted entry path"
-        );
-        let stem = part.split('.').next().unwrap_or("").to_uppercase();
-        ensure!(
-            !matches!(
-                stem.as_str(),
-                "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-            ) && !["COM", "LPT"]
-                .iter()
-                .any(
-                    |prefix| stem.strip_prefix(prefix).is_some_and(|suffix| matches!(
-                        suffix,
-                        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-                    ))
-                ),
-            "reserved device name in encrypted entry"
-        );
-    }
-    ensure!(
-        Path::new(path)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_))),
-        "unsafe encrypted path"
-    );
-    Ok(())
 }
 
 fn entry_path(path: &Path) -> Result<String> {

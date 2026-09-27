@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Bound FASTDIR1 entry counts by a 100,000-entry limit and physical archive size
+  before allocation; reject FST chunks exceeding 64 MiB decoded size.
+- Reuse encrypted archive path checks for directory and ZIP names, including
+  Windows reserved names, and default ZIP reading to 64 GiB and 100,000 entries
+  with explicit CLI/library overrides for larger archives.
+- Publish directory archives from temporary sibling files after successful
+  compression; document the current transactional extraction behavior.
+- Run CPU-only tests and lint plus an all-features build check in Windows/Linux CI.
 - Extract ZIP and Fastener directory archives into temporary sibling directories,
   then publish only after every entry validates. Failed extraction no longer leaves
   partial output directories behind.

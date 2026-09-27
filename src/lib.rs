@@ -8,11 +8,12 @@ mod archive;
 mod bundle;
 mod encrypted;
 mod file_ops;
+mod path_safety;
 mod recovery;
 
 pub use recovery::{
     RecoveryInfo, RecoveryReport, create_recovery_with_progress, recovery_info, recovery_path,
-    recovery_plan, repair_with_progress, repaired_path,
+    recovery_plan, repair_with_progress, repair_with_zip_limits_and_progress, repaired_path,
 };
 
 pub use encrypted::{
@@ -30,9 +31,10 @@ pub use bundle::{
     decompress_directory_bundle_with_progress, verify_directory_bundle_with_progress,
 };
 pub use file_ops::{
-    ProgressInfo, ProgressPhase, ZipCompressionReport, ZipReport, compress_file,
+    ProgressInfo, ProgressPhase, ZipCompressionReport, ZipLimits, ZipReport, compress_file,
     compress_file_with_progress, compress_zip_file, compress_zip_file_with_progress,
-    decompress_file, decompress_file_with_progress, extract_zip_file,
-    extract_zip_file_with_progress, verify_file, verify_file_with_progress, verify_zip_file,
-    verify_zip_file_with_progress,
+    decompress_file, decompress_file_with_progress, extract_zip_file, extract_zip_file_with_limits,
+    extract_zip_file_with_limits_and_progress, extract_zip_file_with_progress, verify_file,
+    verify_file_with_progress, verify_zip_file, verify_zip_file_with_limits,
+    verify_zip_file_with_limits_and_progress, verify_zip_file_with_progress,
 };

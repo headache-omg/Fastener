@@ -2,6 +2,7 @@ use crate::{
     AnalysisBackend, ArchiveStats, CompressOptions, VerifyReport,
     analyzer::analyze,
     archive::{HEADER_LEN, MAGIC, MAX_CHUNKS, ParsedChunk, VERSION, parse_archive},
+    path_safety::safe_path,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use memmap2::{Mmap, MmapOptions};
@@ -25,6 +26,25 @@ const ANALYSIS_SEGMENT: usize = 64 * 1024 * 1024;
 const CHUNK_BATCH: usize = 64;
 const DECODE_BATCH: usize = 32;
 const BATCH_BYTES: usize = 256 * 1024 * 1024;
+const MAX_ZIP_ENTRIES: usize = 100_000;
+const MAX_ZIP_EXPANDED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+/// Resource limits for reading untrusted ZIP archives. Raise them explicitly
+/// when processing a larger trusted archive.
+#[derive(Clone, Copy, Debug)]
+pub struct ZipLimits {
+    pub max_entries: usize,
+    pub max_output_bytes: u64,
+}
+
+impl Default for ZipLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: MAX_ZIP_ENTRIES,
+            max_output_bytes: MAX_ZIP_EXPANDED_BYTES,
+        }
+    }
+}
 
 struct EncodedChunk<'a> {
     offset: u64,
@@ -364,6 +384,14 @@ pub fn extract_zip_file(input: &Path, output_directory: &Path) -> Result<ZipRepo
     extract_zip_file_with_progress(input, output_directory, |_| {})
 }
 
+pub fn extract_zip_file_with_limits(
+    input: &Path,
+    output_directory: &Path,
+    limits: ZipLimits,
+) -> Result<ZipReport> {
+    extract_zip_file_with_limits_and_progress(input, output_directory, limits, |_| {})
+}
+
 /// Create a conventional single-entry Deflate/Zip64 archive without loading the
 /// complete input into memory. The resulting archive is readable by Windows and
 /// other standard ZIP implementations.
@@ -394,8 +422,9 @@ pub fn compress_zip_file_with_progress(
     let entry_name = input
         .file_name()
         .context("ZIP input path does not have a file name")?
-        .to_string_lossy()
-        .into_owned();
+        .to_str()
+        .context("ZIP entry name is not UTF-8")?;
+    safe_path(entry_name)?;
     let mut temporary = temporary_output(output)?;
     let mut archive = zip::ZipWriter::new(BufWriter::with_capacity(
         8 * 1024 * 1024,
@@ -452,6 +481,20 @@ pub fn compress_zip_file_with_progress(
 pub fn extract_zip_file_with_progress(
     input: &Path,
     output_directory: &Path,
+    progress: impl FnMut(ProgressInfo),
+) -> Result<ZipReport> {
+    extract_zip_file_with_limits_and_progress(
+        input,
+        output_directory,
+        ZipLimits::default(),
+        progress,
+    )
+}
+
+pub fn extract_zip_file_with_limits_and_progress(
+    input: &Path,
+    output_directory: &Path,
+    limits: ZipLimits,
     mut progress: impl FnMut(ProgressInfo),
 ) -> Result<ZipReport> {
     ensure!(
@@ -459,8 +502,8 @@ pub fn extract_zip_file_with_progress(
         "ZIP output directory already exists: {}",
         output_directory.display()
     );
-    let metadata = read_zip_metadata(input)?;
-    let uncompressed_size = metadata.iter().map(|entry| entry.size).sum();
+    let metadata = read_zip_metadata(input, limits)?;
+    let uncompressed_size = zip_total_size(&metadata, limits.max_output_bytes)?;
     let workers = WorkerTracker::default();
     let parent = output_directory
         .parent()
@@ -510,12 +553,24 @@ pub fn verify_zip_file(input: &Path) -> Result<ZipReport> {
     verify_zip_file_with_progress(input, |_| {})
 }
 
+pub fn verify_zip_file_with_limits(input: &Path, limits: ZipLimits) -> Result<ZipReport> {
+    verify_zip_file_with_limits_and_progress(input, limits, |_| {})
+}
+
 pub fn verify_zip_file_with_progress(
     input: &Path,
+    progress: impl FnMut(ProgressInfo),
+) -> Result<ZipReport> {
+    verify_zip_file_with_limits_and_progress(input, ZipLimits::default(), progress)
+}
+
+pub fn verify_zip_file_with_limits_and_progress(
+    input: &Path,
+    limits: ZipLimits,
     mut progress: impl FnMut(ProgressInfo),
 ) -> Result<ZipReport> {
-    let metadata = read_zip_metadata(input)?;
-    let uncompressed_size = metadata.iter().map(|entry| entry.size).sum();
+    let metadata = read_zip_metadata(input, limits)?;
+    let uncompressed_size = zip_total_size(&metadata, limits.max_output_bytes)?;
     let workers = WorkerTracker::default();
     run_parallel_progress(
         ProgressPhase::ZipVerifying,
@@ -544,12 +599,16 @@ pub fn verify_zip_file_with_progress(
     })
 }
 
-fn read_zip_metadata(input: &Path) -> Result<Vec<ZipEntryMeta>> {
+fn read_zip_metadata(input: &Path, limits: ZipLimits) -> Result<Vec<ZipEntryMeta>> {
+    ensure!(limits.max_entries > 0, "ZIP entry limit must be positive");
     let mut archive = open_zip(input)?;
+    ensure!(archive.len() <= limits.max_entries, "too many ZIP entries");
     let mut metadata = Vec::with_capacity(archive.len());
     let mut seen = HashSet::with_capacity(archive.len());
     for index in 0..archive.len() {
         let entry = archive.by_index(index)?;
+        let name = entry.name().strip_suffix('/').unwrap_or(entry.name());
+        safe_path(name)?;
         let path = entry
             .enclosed_name()
             .context("ZIP contains an unsafe path")?
@@ -568,6 +627,19 @@ fn read_zip_metadata(input: &Path) -> Result<Vec<ZipEntryMeta>> {
         });
     }
     Ok(metadata)
+}
+
+fn zip_total_size(metadata: &[ZipEntryMeta], max_output_bytes: u64) -> Result<u64> {
+    metadata.iter().try_fold(0u64, |total, entry| {
+        let total = total
+            .checked_add(entry.size)
+            .context("ZIP expanded size overflow")?;
+        ensure!(
+            total <= max_output_bytes,
+            "ZIP expanded size exceeds configured limit"
+        );
+        Ok(total)
+    })
 }
 
 fn open_zip(input: &Path) -> Result<zip::ZipArchive<File>> {
@@ -608,6 +680,10 @@ fn extract_zip_entry(
         if count == 0 {
             break;
         }
+        ensure!(
+            count as u64 <= meta.size.saturating_sub(written),
+            "ZIP entry exceeds its declared expanded size"
+        );
         writer.write_all(&buffer[..count])?;
         written += count as u64;
         completed.fetch_add(count as u64, Ordering::Relaxed);
@@ -640,6 +716,10 @@ fn verify_zip_entry(
         if count == 0 {
             break;
         }
+        ensure!(
+            count as u64 <= meta.size.saturating_sub(read),
+            "ZIP entry exceeds its declared expanded size"
+        );
         read += count as u64;
         completed.fetch_add(count as u64, Ordering::Relaxed);
     }
@@ -964,6 +1044,21 @@ fn ensure_distinct(input: &Path, output: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn zip_expansion_budget_rejects_overflow_and_excess() {
+        let entry = |size| ZipEntryMeta {
+            index: 0,
+            path: PathBuf::from("file"),
+            size,
+            is_dir: false,
+        };
+        assert!(zip_total_size(&[entry(MAX_ZIP_EXPANDED_BYTES)], MAX_ZIP_EXPANDED_BYTES).is_ok());
+        assert!(
+            zip_total_size(&[entry(MAX_ZIP_EXPANDED_BYTES + 1)], MAX_ZIP_EXPANDED_BYTES).is_err()
+        );
+        assert!(zip_total_size(&[entry(u64::MAX), entry(1)], u64::MAX).is_err());
+    }
 
     #[test]
     fn batches_respect_byte_and_count_limits() {

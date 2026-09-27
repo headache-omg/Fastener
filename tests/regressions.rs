@@ -1,7 +1,9 @@
 use fastener::{
-    CompressOptions, ProgressPhase, compress_bytes, compress_directory_bundle_with_progress,
-    compress_file_with_progress, compress_zip_file_with_progress,
-    decompress_directory_bundle_with_progress, decompress_file, extract_zip_file, verify_file,
+    CompressOptions, ProgressPhase, ZipLimits, compress_bytes,
+    compress_directory_bundle_with_progress, compress_file_with_progress,
+    compress_zip_file_with_progress, decompress_directory_bundle_with_progress, decompress_file,
+    extract_zip_file, verify_directory_bundle_with_progress, verify_file, verify_zip_file,
+    verify_zip_file_with_limits,
 };
 use std::{
     fs,
@@ -148,4 +150,156 @@ fn invalid_zip_does_not_leave_partial_output() {
     assert!(extract_zip_file(&archive, &output).is_err());
     assert!(!output.exists());
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn forged_directory_counts_are_rejected_before_allocation() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("forged.fst");
+    let output = temp.path().join("output");
+    let mut bytes = b"FASTDIR1".to_vec();
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    fs::write(&archive, bytes).unwrap();
+    assert!(verify_directory_bundle_with_progress(&archive, |_| {}).is_err());
+    assert!(decompress_directory_bundle_with_progress(&archive, &output, |_| {}).is_err());
+    assert!(!output.exists());
+}
+
+#[test]
+fn directory_and_zip_reject_windows_device_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("reserved.fst");
+    let output = temp.path().join("output");
+    let mut bytes = b"FASTDIR1".to_vec();
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.extend_from_slice(&[1, 0, 0, 0]);
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.extend_from_slice(b"CON");
+    fs::write(&archive, bytes).unwrap();
+    assert!(verify_directory_bundle_with_progress(&archive, |_| {}).is_err());
+    assert!(decompress_directory_bundle_with_progress(&archive, &output, |_| {}).is_err());
+    assert!(!output.exists());
+
+    let zip_path = temp.path().join("reserved.zip");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+    zip.start_file("CON", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"content").unwrap();
+    zip.finish().unwrap();
+    assert!(verify_zip_file(&zip_path).is_err());
+    assert!(extract_zip_file(&zip_path, &output).is_err());
+    assert!(!output.exists());
+}
+
+#[test]
+fn oversized_fst_chunk_is_rejected_without_decoding() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive_path = temp.path().join("large-chunk.fst");
+    let (mut archive, _) = compress_bytes(b"small", &CompressOptions::default()).unwrap();
+    archive[12..20].copy_from_slice(&(u32::MAX as u64).to_le_bytes());
+    archive[68..72].copy_from_slice(&u32::MAX.to_le_bytes());
+    fs::write(&archive_path, archive).unwrap();
+    assert!(verify_file(&archive_path).is_err());
+}
+
+#[test]
+fn interrupted_directory_compression_leaves_no_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file"), vec![1u8; 100_000]).unwrap();
+    let output = temp.path().join("source.fst");
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        compress_directory_bundle_with_progress(
+            &source,
+            &output,
+            &CompressOptions::default(),
+            |info| {
+                if info.phase == ProgressPhase::Compressing {
+                    panic!("simulated interruption");
+                }
+            },
+        )
+        .unwrap();
+    }));
+    assert!(result.is_err());
+    assert!(!output.exists());
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn zip_output_budget_can_be_raised_explicitly() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("limited.zip");
+    let output = temp.path().join("restored");
+    let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    writer
+        .start_file("data.txt", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    writer.write_all(b"1234567890").unwrap();
+    writer.finish().unwrap();
+
+    let small = ZipLimits {
+        max_entries: 1,
+        max_output_bytes: 9,
+    };
+    assert!(verify_zip_file_with_limits(&archive, small).is_err());
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_fastener"))
+        .arg("verify")
+        .arg(&archive)
+        .args(["--zip-max-output-bytes", "9"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_fastener"))
+        .arg("decompress")
+        .arg(&archive)
+        .arg("-o")
+        .arg(&output)
+        .args(["--zip-max-output-bytes", "9"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!output.exists());
+
+    let large = ZipLimits {
+        max_output_bytes: 10,
+        ..small
+    };
+    assert!(verify_zip_file_with_limits(&archive, large).is_ok());
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_fastener"))
+        .arg("verify")
+        .arg(&archive)
+        .args(["--zip-max-output-bytes", "10"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_fastener"))
+        .arg("decompress")
+        .arg(&archive)
+        .arg("-o")
+        .arg(&output)
+        .args(["--zip-max-output-bytes", "10"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read(output.join("data.txt")).unwrap(), b"1234567890");
 }

@@ -7,7 +7,7 @@ $stage = Join-Path $PSScriptRoot ("release/oss-$version-" + [guid]::NewGuid().To
 $source = Join-Path $stage 'source'
 $windows = Join-Path $stage 'windows'
 New-Item -ItemType Directory -Force $source, $OutputDirectory | Out-Null
-foreach ($name in @('src', 'tests', 'examples', 'samples', 'docs', 'LICENSES', 'Cargo.toml', 'Cargo.lock', 'README.md', 'FORMAT.md', 'LICENSE', 'CHANGELOG.md', '.gitignore', 'build-release.ps1', 'package-oss.ps1')) {
+foreach ($name in @('src', 'tests', 'examples', 'samples', 'docs', 'LICENSES', '.github', 'Cargo.toml', 'Cargo.lock', 'README.md', 'FORMAT.md', 'LICENSE', 'CHANGELOG.md', '.gitignore', 'build-release.ps1', 'package-oss.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $source -Recurse
 }
 $benchDest = Join-Path $source 'benchmarks'

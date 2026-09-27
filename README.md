@@ -104,9 +104,9 @@ fastener-gui.exe
 GPU analysis affects only where chunks are cut. Compression and decompression
 remain CPU-parallel, and archives never require a GPU. File commands use memory
 mapping, 64 MiB analysis segments, and compression/decoding batches limited by
-both chunk count and a 256 MiB data budget. A single oversized archive chunk is
-decoded on its own and can exceed that budget; codec workspaces and mapped pages
-are additional memory costs. Segments at most twice the target chunk size require
+both chunk count and a 256 MiB data budget. The decoder rejects chunks larger
+than 64 MiB; codec workspaces and mapped pages are additional memory costs.
+Segments at most twice the target chunk size require
 no cuts, so their scoring and GPU initialization are skipped without changing
 boundaries. Larger segments retain the automatic hybrid analysis.
 For files smaller than 16 MiB, any necessary scoring also runs entirely on the CPU.
@@ -278,7 +278,9 @@ batches, invalid compression levels, and GPU scoring with unaligned input tails.
 File verification and decompression now check the whole-file BLAKE3 digest as
 well as individual chunks. FST compression, file decompression, and ZIP creation
 write to a temporary sibling file and replace the requested output only after
-success. This does not make an entire directory or ZIP extraction transactional.
+success. Directory and ZIP extraction now also use temporary sibling directories
+and publish only after all entries validate. Directory FST creation uses a
+temporary sibling file as well.
 
 GPU uploads no longer assemble every byte into a separate u32 staging array.
 Raw chunks are read directly from the archive mapping during file decoding and
@@ -292,13 +294,20 @@ The reproducible comparison and measured results are in
 
 - File FST and directory FST use distinct magic signatures. Directory FST stores
   a safe relative-path manifest plus independently verified embedded FST streams.
+- Directory archives are limited to 100,000 entries and 4,096-byte UTF-8 paths.
+  ZIP verification/extraction accepts at most 100,000 entries and 64 GiB of
+  declared expanded data by default. For larger known ZIP archives, use
+  `--zip-max-entries N` and `--zip-max-output-bytes BYTES` with `verify`,
+  `decompress`, or ZIP `repair` to raise those limits. Windows device names, alternate-stream separators,
+  and ambiguous trailing dots/spaces are rejected across archive types.
 - The automatic GPU scorer is intentionally approximate and needs real-world tuning.
 - Level 0 chunks use LZ4. Levels 1 through 22 use Zstd at the selected level;
   automatic segmentation, parallel orchestration, and the verified container
   are Fastener's format-level additions.
 - Encryption is optional and uses the separate FSTENC01 format. Older Fastener
-  versions cannot read it. There are no digital signatures, recovery records,
-  or random-access streaming index. Conventional ZIP output is not encrypted.
+  versions cannot read it. There are no digital signatures or random-access
+  streaming index. Separate recovery sidecars are available. Conventional ZIP
+  output is not encrypted.
 - ZIP 10 GB/s and FST 100 GB/s are ceiling targets for sufficiently parallel,
   memory-resident workloads. They are not end-to-end guarantees: Deflate stream
   dependencies, file distribution, CPU, memory bandwidth, codec ratio, and

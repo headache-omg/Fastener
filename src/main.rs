@@ -1,13 +1,14 @@
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use fastener::{
-    CompressOptions, DIRECTORY_MAGIC, compress_directory_bundle_with_progress, compress_file,
-    compress_zip_file, decompress_directory_bundle_with_progress, decompress_file,
-    extract_zip_file, verify_directory_bundle_with_progress, verify_file, verify_zip_file,
+    CompressOptions, DIRECTORY_MAGIC, ZipLimits, compress_directory_bundle_with_progress,
+    compress_file, compress_zip_file, decompress_directory_bundle_with_progress, decompress_file,
+    extract_zip_file_with_limits, verify_directory_bundle_with_progress, verify_file,
+    verify_zip_file_with_limits,
 };
 use fastener::{
     ENCRYPTED_MAGIC, compress_encrypted_with_progress, decompress_encrypted_with_progress,
-    encrypted_is_directory, verify_encrypted_with_progress,
+    encrypted_is_directory, repair_with_zip_limits_and_progress, verify_encrypted_with_progress,
 };
 use rayon::ThreadPoolBuilder;
 use std::{
@@ -53,6 +54,10 @@ enum Command {
         force: bool,
         #[arg(long)]
         password_file: Option<PathBuf>,
+        #[arg(long, value_name = "N")]
+        zip_max_entries: Option<usize>,
+        #[arg(long, value_name = "BYTES")]
+        zip_max_output_bytes: Option<u64>,
     },
     /// Compress one file into a .fst archive.
     Compress {
@@ -93,12 +98,22 @@ enum Command {
         force: bool,
         #[arg(long)]
         password_file: Option<PathBuf>,
+        /// Maximum ZIP entries to accept (default: 100000).
+        #[arg(long, value_name = "N")]
+        zip_max_entries: Option<usize>,
+        /// Maximum ZIP expanded bytes (default: 64 GiB).
+        #[arg(long, value_name = "BYTES")]
+        zip_max_output_bytes: Option<u64>,
     },
     /// Fully decode an archive in memory and verify every checksum.
     Verify {
         input: PathBuf,
         #[arg(long)]
         password_file: Option<PathBuf>,
+        #[arg(long, value_name = "N")]
+        zip_max_entries: Option<usize>,
+        #[arg(long, value_name = "BYTES")]
+        zip_max_output_bytes: Option<u64>,
     },
     /// Measure compression and decompression on one input file.
     Benchmark {
@@ -160,6 +175,8 @@ fn run() -> Result<()> {
             output,
             force,
             password_file,
+            zip_max_entries,
+            zip_max_output_bytes,
         } => {
             let recovery = recovery.unwrap_or_else(|| fastener::recovery_path(&input));
             let info = fastener::recovery_info(&recovery)?;
@@ -174,11 +191,12 @@ fn run() -> Result<()> {
             };
             let output = output.unwrap_or_else(|| fastener::repaired_path(&input));
             prepare_output(&input, &output, force)?;
-            let report = fastener::repair_with_progress(
+            let report = repair_with_zip_limits_and_progress(
                 &input,
                 &recovery,
                 &output,
                 password.as_ref().map(|p| p.as_slice()),
+                zip_limits(zip_max_entries, zip_max_output_bytes),
                 |_| {},
             )?;
             println!(
@@ -282,12 +300,19 @@ fn run() -> Result<()> {
             output,
             force,
             password_file,
+            zip_max_entries,
+            zip_max_output_bytes,
         } => {
             let started = Instant::now();
             let kind = archive_kind(&input)?;
             ensure!(
                 password_file.is_none() || kind == CliArchiveKind::Encrypted,
                 "--password-file is only supported for encrypted Fastener archives"
+            );
+            ensure!(
+                (zip_max_entries.is_none() && zip_max_output_bytes.is_none())
+                    || kind == CliArchiveKind::Zip,
+                "ZIP limits are only supported for ZIP archives"
             );
             if kind == CliArchiveKind::Encrypted {
                 let directory = encrypted_is_directory(&input)?;
@@ -314,7 +339,11 @@ fn run() -> Result<()> {
             if archive_kind(&input)? == CliArchiveKind::Zip {
                 let output = output.unwrap_or_else(|| default_zip_directory(&input));
                 ensure!(!output.exists(), "{} already exists", output.display());
-                let report = extract_zip_file(&input, &output)?;
+                let report = extract_zip_file_with_limits(
+                    &input,
+                    &output,
+                    zip_limits(zip_max_entries, zip_max_output_bytes),
+                )?;
                 println!("extracted   : {} entries", report.entries);
                 println!("size        : {}", human_bytes(report.uncompressed_size));
                 println!(
@@ -369,12 +398,19 @@ fn run() -> Result<()> {
         Command::Verify {
             input,
             password_file,
+            zip_max_entries,
+            zip_max_output_bytes,
         } => {
             let started = Instant::now();
             let kind = archive_kind(&input)?;
             ensure!(
                 password_file.is_none() || kind == CliArchiveKind::Encrypted,
                 "--password-file is only supported for encrypted Fastener archives"
+            );
+            ensure!(
+                (zip_max_entries.is_none() && zip_max_output_bytes.is_none())
+                    || kind == CliArchiveKind::Zip,
+                "ZIP limits are only supported for ZIP archives"
             );
             if kind == CliArchiveKind::Encrypted {
                 let password = read_password(password_file.as_deref(), false)?;
@@ -388,7 +424,10 @@ fn run() -> Result<()> {
                 return Ok(());
             }
             if archive_kind(&input)? == CliArchiveKind::Zip {
-                let report = verify_zip_file(&input)?;
+                let report = verify_zip_file_with_limits(
+                    &input,
+                    zip_limits(zip_max_entries, zip_max_output_bytes),
+                )?;
                 println!("archive     : {}", input.display());
                 println!("entries     : {}", report.entries);
                 println!("expanded    : {}", human_bytes(report.uncompressed_size));
@@ -517,6 +556,14 @@ fn read_password(file: Option<&Path>, confirm: bool) -> Result<Zeroizing<Vec<u8>
         "password must be 1-1024 UTF-8 bytes"
     );
     Ok(password)
+}
+
+fn zip_limits(max_entries: Option<usize>, max_output_bytes: Option<u64>) -> ZipLimits {
+    let defaults = ZipLimits::default();
+    ZipLimits {
+        max_entries: max_entries.unwrap_or(defaults.max_entries),
+        max_output_bytes: max_output_bytes.unwrap_or(defaults.max_output_bytes),
+    }
 }
 
 fn prepare_output(input: &Path, path: &Path, force: bool) -> Result<()> {

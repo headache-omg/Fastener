@@ -239,8 +239,40 @@ fn zip_and_directory_bundle_recovery_verify_formats() {
         let mut broken = original.clone();
         broken[0] ^= 1;
         fs::write(&archive, broken).unwrap();
-        repair_with_progress(&archive, &parity, &repaired_path(&archive), None, |_| {}).unwrap();
-        assert_eq!(fs::read(repaired_path(&archive)).unwrap(), original);
+        let output = repaired_path(&archive);
+        if is_zip {
+            let small = ZipLimits {
+                max_entries: 1,
+                max_output_bytes: 7999,
+            };
+            assert!(
+                repair_with_zip_limits_and_progress(
+                    &archive,
+                    &parity,
+                    &output,
+                    None,
+                    small,
+                    |_| {},
+                )
+                .is_err()
+            );
+            assert!(!output.exists());
+            repair_with_zip_limits_and_progress(
+                &archive,
+                &parity,
+                &output,
+                None,
+                ZipLimits {
+                    max_output_bytes: 8000,
+                    ..small
+                },
+                |_| {},
+            )
+            .unwrap();
+        } else {
+            repair_with_progress(&archive, &parity, &output, None, |_| {}).unwrap();
+        }
+        assert_eq!(fs::read(output).unwrap(), original);
     }
 }
 

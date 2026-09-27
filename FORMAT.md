@@ -31,6 +31,8 @@ Records immediately follow the header and are stored in original-file order.
 The decoder rejects gaps, overlaps, truncation, trailing bytes, unsupported codecs,
 chunk hash failures, and whole-file hash failures. Analyzer metadata is deliberately
 not stored: hardware only influences boundaries and is never required for decoding.
+Current decoders reject decoded chunks larger than 64 MiB to bound allocations
+from untrusted archive records. The file encoder produces at most 64 MiB chunks.
 
 Codec 2 was added by Fastener 0.3.0 without changing the container version. Older
 codec-0/1 archives remain readable. New 0.3.0 archives prioritize codec 2 for
@@ -40,7 +42,10 @@ parallel decode speed.
 
 A folder is stored in one file with the distinct ASCII magic `FASTDIR1`. All
 paths are UTF-8, relative, and use `/` separators. Absolute paths, parent
-components, duplicate paths, and symbolic links are rejected.
+components, duplicate paths, symbolic links, Windows device names, alternate
+stream separators, and trailing dots/spaces are rejected. Current readers limit
+archives to 100,000 entries and each encoded path to 4,096 bytes. The declared
+entry count must also fit the physical archive length.
 
 ### Directory header (28 bytes)
 
