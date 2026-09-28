@@ -297,6 +297,9 @@ The reproducible comparison and measured results are in
 - File FST and directory FST use distinct magic signatures. Directory FST stores
   a safe relative-path manifest plus independently verified embedded FST streams.
 - Directory archives are limited to 100,000 entries and 4,096-byte UTF-8 paths.
+  Ordinary file and directory FST verification/extraction also defaults to a
+  64 GiB expanded-size limit. Use `--fst-max-output-bytes BYTES` with `verify`,
+  `decompress`, or FST `repair` for a larger trusted archive.
   ZIP verification/extraction accepts at most 100,000 entries and 64 GiB of
   declared expanded data by default. For larger known ZIP archives, use
   `--zip-max-entries N` and `--zip-max-output-bytes BYTES` with `verify`,

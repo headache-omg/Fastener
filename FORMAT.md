@@ -45,7 +45,9 @@ paths are UTF-8, relative, and use `/` separators. Absolute paths, parent
 components, duplicate paths, symbolic links, Windows device names, alternate
 stream separators, and trailing dots/spaces are rejected. Current readers limit
 archives to 100,000 entries and each encoded path to 4,096 bytes. The declared
-entry count must also fit the physical archive length.
+entry count must also fit the physical archive length. A file entry cannot be
+the parent of another entry. Readers default to a 64 GiB combined expanded-size
+limit; trusted larger archives require an explicit override.
 
 ### Directory header (28 bytes)
 

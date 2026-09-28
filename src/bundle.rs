@@ -1,11 +1,12 @@
 use crate::{
-    CompressOptions, ProgressInfo, compress_file_with_progress, decompress_file_with_progress,
+    CompressOptions, FstLimits, ProgressInfo, compress_file_with_progress,
+    decompress_file_with_limits_and_progress,
     path_safety::{MAX_ENTRY_PATH, safe_path},
-    verify_file_with_progress,
+    verify_file_with_limits_and_progress,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fs::{self, File},
     io::{self, BufReader, BufWriter, Read, Seek, Write},
     path::{Component, Path, PathBuf},
@@ -135,6 +136,20 @@ pub fn compress_directory_bundle_with_progress(
 pub fn decompress_directory_bundle_with_progress(
     input: &Path,
     output_directory: &Path,
+    progress: impl FnMut(ProgressInfo),
+) -> Result<DirectoryReport> {
+    decompress_directory_bundle_with_limits_and_progress(
+        input,
+        output_directory,
+        FstLimits::default(),
+        progress,
+    )
+}
+
+pub fn decompress_directory_bundle_with_limits_and_progress(
+    input: &Path,
+    output_directory: &Path,
+    limits: FstLimits,
     mut progress: impl FnMut(ProgressInfo),
 ) -> Result<DirectoryReport> {
     ensure!(
@@ -146,7 +161,8 @@ pub fn decompress_directory_bundle_with_progress(
         .with_context(|| format!("could not open directory archive {}", input.display()))?;
     let archive_size = input_file.metadata()?.len();
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, input_file);
-    let (entry_count, file_count, original_size) = read_bundle_header(&mut reader, archive_size)?;
+    let (entry_count, file_count, original_size) =
+        read_bundle_header(&mut reader, archive_size, limits)?;
     let parent = output_directory.parent().unwrap_or_else(|| Path::new("."));
     let temporary = tempfile::Builder::new()
         .prefix(".fastener-extract-")
@@ -156,7 +172,7 @@ pub fn decompress_directory_bundle_with_progress(
         .prefix(".fastener-output-")
         .tempdir_in(parent)
         .context("could not create staged output directory")?;
-    let mut seen = HashSet::with_capacity(entry_count);
+    let mut seen = HashMap::with_capacity(entry_count);
     let mut completed_before = 0u64;
     let mut observed_files = 0usize;
     let mut observed_size = 0u64;
@@ -164,7 +180,7 @@ pub fn decompress_directory_bundle_with_progress(
 
     for index in 0..entry_count {
         let entry = read_entry_header(&mut reader)?;
-        ensure_unique_path(&entry.relative, &mut seen)?;
+        ensure_unique_path(&entry.relative, entry.kind, &mut seen)?;
         let destination = staged_output.path().join(&entry.relative);
         if entry.kind == KIND_DIRECTORY {
             fs::create_dir_all(&destination)?;
@@ -172,20 +188,31 @@ pub fn decompress_directory_bundle_with_progress(
         }
         ensure!(entry.kind == KIND_FILE, "unknown directory entry kind");
         observed_files += 1;
-        observed_size = observed_size.saturating_add(entry.original_size);
+        observed_size = observed_size
+            .checked_add(entry.original_size)
+            .context("directory expanded size overflow")?;
+        ensure!(
+            observed_size <= original_size,
+            "directory entries exceed declared expanded size"
+        );
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
         let temporary_archive = temporary.path().join(format!("entry-{index}.fst"));
         copy_embedded_archive(&mut reader, &temporary_archive, entry.archive_size)?;
         let base = completed_before;
-        let report = decompress_file_with_progress(&temporary_archive, &destination, |info| {
-            progress(ProgressInfo {
-                phase: info.phase,
-                completed: base.saturating_add(info.completed).min(original_size),
-                total: original_size,
-            });
-        })?;
+        let report = decompress_file_with_limits_and_progress(
+            &temporary_archive,
+            &destination,
+            limits,
+            |info| {
+                progress(ProgressInfo {
+                    phase: info.phase,
+                    completed: base.saturating_add(info.completed).min(original_size),
+                    total: original_size,
+                });
+            },
+        )?;
         ensure!(
             report.original_size == entry.original_size,
             "embedded FST size does not match directory index"
@@ -194,6 +221,7 @@ pub fn decompress_directory_bundle_with_progress(
         fs::remove_file(&temporary_archive)?;
         completed_before = completed_before.saturating_add(entry.original_size);
     }
+    ensure_no_file_ancestors(&seen)?;
     ensure!(
         observed_files == file_count,
         "directory file count mismatch"
@@ -224,19 +252,28 @@ pub fn decompress_directory_bundle_with_progress(
 
 pub fn verify_directory_bundle_with_progress(
     input: &Path,
+    progress: impl FnMut(ProgressInfo),
+) -> Result<DirectoryReport> {
+    verify_directory_bundle_with_limits_and_progress(input, FstLimits::default(), progress)
+}
+
+pub fn verify_directory_bundle_with_limits_and_progress(
+    input: &Path,
+    limits: FstLimits,
     mut progress: impl FnMut(ProgressInfo),
 ) -> Result<DirectoryReport> {
     let input_file = File::open(input)
         .with_context(|| format!("could not open directory archive {}", input.display()))?;
     let archive_size = input_file.metadata()?.len();
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, input_file);
-    let (entry_count, file_count, original_size) = read_bundle_header(&mut reader, archive_size)?;
+    let (entry_count, file_count, original_size) =
+        read_bundle_header(&mut reader, archive_size, limits)?;
     let parent = input.parent().unwrap_or_else(|| Path::new("."));
     let temporary = tempfile::Builder::new()
         .prefix(".fastener-verify-")
         .tempdir_in(parent)
         .context("could not create verification workspace")?;
-    let mut seen = HashSet::with_capacity(entry_count);
+    let mut seen = HashMap::with_capacity(entry_count);
     let mut completed_before = 0u64;
     let mut observed_files = 0usize;
     let mut observed_size = 0u64;
@@ -244,17 +281,23 @@ pub fn verify_directory_bundle_with_progress(
 
     for index in 0..entry_count {
         let entry = read_entry_header(&mut reader)?;
-        ensure_unique_path(&entry.relative, &mut seen)?;
+        ensure_unique_path(&entry.relative, entry.kind, &mut seen)?;
         if entry.kind == KIND_DIRECTORY {
             continue;
         }
         ensure!(entry.kind == KIND_FILE, "unknown directory entry kind");
         observed_files += 1;
-        observed_size = observed_size.saturating_add(entry.original_size);
+        observed_size = observed_size
+            .checked_add(entry.original_size)
+            .context("directory expanded size overflow")?;
+        ensure!(
+            observed_size <= original_size,
+            "directory entries exceed declared expanded size"
+        );
         let temporary_archive = temporary.path().join(format!("entry-{index}.fst"));
         copy_embedded_archive(&mut reader, &temporary_archive, entry.archive_size)?;
         let base = completed_before;
-        let report = verify_file_with_progress(&temporary_archive, |info| {
+        let report = verify_file_with_limits_and_progress(&temporary_archive, limits, |info| {
             progress(ProgressInfo {
                 phase: info.phase,
                 completed: base.saturating_add(info.completed).min(original_size),
@@ -269,6 +312,7 @@ pub fn verify_directory_bundle_with_progress(
         fs::remove_file(&temporary_archive)?;
         completed_before = completed_before.saturating_add(entry.original_size);
     }
+    ensure_no_file_ancestors(&seen)?;
     ensure!(
         observed_files == file_count,
         "directory file count mismatch"
@@ -348,9 +392,26 @@ fn decode_relative_path(encoded: Vec<u8>) -> Result<PathBuf> {
     ))
 }
 
-fn ensure_unique_path(path: &Path, seen: &mut HashSet<String>) -> Result<()> {
+fn ensure_unique_path(path: &Path, kind: u8, seen: &mut HashMap<String, u8>) -> Result<()> {
     let key = path.to_string_lossy().replace('\\', "/").to_lowercase();
-    ensure!(seen.insert(key), "duplicate directory entry path");
+    ensure!(
+        seen.insert(key, kind).is_none(),
+        "duplicate directory entry path"
+    );
+    Ok(())
+}
+
+fn ensure_no_file_ancestors(seen: &HashMap<String, u8>) -> Result<()> {
+    for path in seen.keys() {
+        let mut remaining = path.as_str();
+        while let Some((parent, _)) = remaining.rsplit_once('/') {
+            ensure!(
+                seen.get(parent) != Some(&KIND_FILE),
+                "file/path collision in directory archive"
+            );
+            remaining = parent;
+        }
+    }
     Ok(())
 }
 
@@ -369,7 +430,11 @@ fn write_bundle_header(
     Ok(())
 }
 
-fn read_bundle_header(reader: &mut impl Read, archive_size: u64) -> Result<(usize, usize, u64)> {
+fn read_bundle_header(
+    reader: &mut impl Read,
+    archive_size: u64,
+    limits: FstLimits,
+) -> Result<(usize, usize, u64)> {
     ensure!(archive_size >= HEADER_LEN, "truncated directory header");
     let mut magic = [0u8; 8];
     reader.read_exact(&mut magic)?;
@@ -387,6 +452,10 @@ fn read_bundle_header(reader: &mut impl Read, archive_size: u64) -> Result<(usiz
     let entries = read_u32(reader)? as usize;
     let files = read_u32(reader)? as usize;
     let original_size = read_u64(reader)?;
+    ensure!(
+        original_size <= limits.max_output_bytes,
+        "directory expanded size exceeds configured limit"
+    );
     ensure!(entries <= MAX_ENTRIES, "unreasonable directory entry count");
     ensure!(
         entries as u64 <= (archive_size - HEADER_LEN) / MIN_ENTRY_LEN,

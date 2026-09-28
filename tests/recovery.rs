@@ -42,6 +42,46 @@ fn two_unknown_corrupt_shards_recover_exactly_and_keep_damaged_input() {
 }
 
 #[test]
+fn fst_repair_respects_expanded_size_limit_before_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let (input, parity, original) = fixture(dir.path(), 128 * 1024);
+    let output = repaired_path(&input);
+    let small = FstLimits {
+        max_output_bytes: 1024,
+    };
+    assert!(
+        repair_with_all_limits_and_progress(
+            &input,
+            &parity,
+            &output,
+            None,
+            RecoveryLimits {
+                fst: small,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .is_err()
+    );
+    assert!(!output.exists());
+    repair_with_all_limits_and_progress(
+        &input,
+        &parity,
+        &output,
+        None,
+        RecoveryLimits {
+            fst: FstLimits {
+                max_output_bytes: 128 * 1024,
+            },
+            ..Default::default()
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(fs::read(output).unwrap(), original);
+}
+
+#[test]
 fn over_capacity_or_deleted_middle_bytes_fail_without_publishing() {
     let dir = tempfile::tempdir().unwrap();
     let (input, parity, original) = fixture(dir.path(), 300_000);

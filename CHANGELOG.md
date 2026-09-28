@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Default ordinary file/directory FST verification and extraction to a 64 GiB
+  expanded-size limit before output creation, with explicit CLI/library overrides
+  for trusted large archives and the same limit during recovery validation.
+  Reject directory and ZIP indexes that put another entry below a file path.
 - Limit encrypted archive verification/extraction to 64 GiB of declared output
   by default, before staging plaintext, with an explicit CLI/library override.
   Apply the same limit during encrypted recovery validation.

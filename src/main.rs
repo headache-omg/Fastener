@@ -1,15 +1,17 @@
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use fastener::{
-    CompressOptions, DIRECTORY_MAGIC, ZipLimits, compress_directory_bundle_with_progress,
-    compress_file, compress_zip_file, decompress_directory_bundle_with_progress, decompress_file,
-    extract_zip_file_with_limits, verify_directory_bundle_with_progress, verify_file,
+    CompressOptions, DIRECTORY_MAGIC, FstLimits, ZipLimits,
+    compress_directory_bundle_with_progress, compress_file, compress_zip_file,
+    decompress_directory_bundle_with_limits_and_progress, decompress_file,
+    decompress_file_with_limits_and_progress, extract_zip_file_with_limits,
+    verify_directory_bundle_with_limits_and_progress, verify_file_with_limits_and_progress,
     verify_zip_file_with_limits,
 };
 use fastener::{
-    ENCRYPTED_MAGIC, EncryptedLimits, compress_encrypted_with_progress,
+    ENCRYPTED_MAGIC, EncryptedLimits, RecoveryLimits, compress_encrypted_with_progress,
     decompress_encrypted_with_limits_and_progress, encrypted_is_directory,
-    repair_with_archive_limits_and_progress, verify_encrypted_with_limits_and_progress,
+    repair_with_all_limits_and_progress, verify_encrypted_with_limits_and_progress,
 };
 use rayon::ThreadPoolBuilder;
 use std::{
@@ -62,6 +64,9 @@ enum Command {
         /// Maximum expanded bytes when authenticating an encrypted archive (default: 64 GiB).
         #[arg(long, value_name = "BYTES")]
         encrypted_max_output_bytes: Option<u64>,
+        /// Maximum expanded bytes when validating an ordinary FST archive (default: 64 GiB).
+        #[arg(long, value_name = "BYTES")]
+        fst_max_output_bytes: Option<u64>,
     },
     /// Compress one file into a .fst archive.
     Compress {
@@ -111,6 +116,9 @@ enum Command {
         /// Maximum encrypted expanded bytes (default: 64 GiB).
         #[arg(long, value_name = "BYTES")]
         encrypted_max_output_bytes: Option<u64>,
+        /// Maximum FST expanded bytes (default: 64 GiB).
+        #[arg(long, value_name = "BYTES")]
+        fst_max_output_bytes: Option<u64>,
     },
     /// Fully decode an archive in memory and verify every checksum.
     Verify {
@@ -124,6 +132,9 @@ enum Command {
         /// Maximum encrypted expanded bytes (default: 64 GiB).
         #[arg(long, value_name = "BYTES")]
         encrypted_max_output_bytes: Option<u64>,
+        /// Maximum FST expanded bytes (default: 64 GiB).
+        #[arg(long, value_name = "BYTES")]
+        fst_max_output_bytes: Option<u64>,
     },
     /// Measure compression and decompression on one input file.
     Benchmark {
@@ -188,6 +199,7 @@ fn run() -> Result<()> {
             zip_max_entries,
             zip_max_output_bytes,
             encrypted_max_output_bytes,
+            fst_max_output_bytes,
         } => {
             let recovery = recovery.unwrap_or_else(|| fastener::recovery_path(&input));
             let info = fastener::recovery_info(&recovery)?;
@@ -206,13 +218,16 @@ fn run() -> Result<()> {
                 encrypted_max_output_bytes.is_none() || info.encrypted,
                 "--encrypted-max-output-bytes requires an encrypted archive"
             );
-            let report = repair_with_archive_limits_and_progress(
+            let report = repair_with_all_limits_and_progress(
                 &input,
                 &recovery,
                 &output,
                 password.as_ref().map(|p| p.as_slice()),
-                zip_limits(zip_max_entries, zip_max_output_bytes),
-                encrypted_limits(encrypted_max_output_bytes),
+                RecoveryLimits {
+                    fst: fst_limits(fst_max_output_bytes),
+                    zip: zip_limits(zip_max_entries, zip_max_output_bytes),
+                    encrypted: encrypted_limits(encrypted_max_output_bytes),
+                },
                 |_| {},
             )?;
             println!(
@@ -319,6 +334,7 @@ fn run() -> Result<()> {
             zip_max_entries,
             zip_max_output_bytes,
             encrypted_max_output_bytes,
+            fst_max_output_bytes,
         } => {
             let started = Instant::now();
             let kind = archive_kind(&input)?;
@@ -334,6 +350,11 @@ fn run() -> Result<()> {
             ensure!(
                 encrypted_max_output_bytes.is_none() || kind == CliArchiveKind::Encrypted,
                 "--encrypted-max-output-bytes requires an encrypted archive"
+            );
+            ensure!(
+                fst_max_output_bytes.is_none()
+                    || matches!(kind, CliArchiveKind::File | CliArchiveKind::Directory),
+                "--fst-max-output-bytes requires an ordinary FST archive"
             );
             if kind == CliArchiveKind::Encrypted {
                 let directory = encrypted_is_directory(&input)?;
@@ -385,7 +406,12 @@ fn run() -> Result<()> {
             } else if archive_kind(&input)? == CliArchiveKind::Directory {
                 let output = output.unwrap_or_else(|| default_directory_output(&input));
                 ensure!(!output.exists(), "{} already exists", output.display());
-                let report = decompress_directory_bundle_with_progress(&input, &output, |_| {})?;
+                let report = decompress_directory_bundle_with_limits_and_progress(
+                    &input,
+                    &output,
+                    fst_limits(fst_max_output_bytes),
+                    |_| {},
+                )?;
                 println!("extracted   : {} files", report.files);
                 println!("size        : {}", human_bytes(report.original_size));
                 println!(
@@ -402,7 +428,12 @@ fn run() -> Result<()> {
             } else {
                 let output = output.unwrap_or_else(|| default_decompressed_path(&input));
                 prepare_output(&input, &output, force)?;
-                let report = decompress_file(&input, &output)?;
+                let report = decompress_file_with_limits_and_progress(
+                    &input,
+                    &output,
+                    fst_limits(fst_max_output_bytes),
+                    |_| {},
+                )?;
                 println!(
                     "decompressed: {} -> {}",
                     human_bytes(report.archive_size),
@@ -427,6 +458,7 @@ fn run() -> Result<()> {
             zip_max_entries,
             zip_max_output_bytes,
             encrypted_max_output_bytes,
+            fst_max_output_bytes,
         } => {
             let started = Instant::now();
             let kind = archive_kind(&input)?;
@@ -442,6 +474,11 @@ fn run() -> Result<()> {
             ensure!(
                 encrypted_max_output_bytes.is_none() || kind == CliArchiveKind::Encrypted,
                 "--encrypted-max-output-bytes requires an encrypted archive"
+            );
+            ensure!(
+                fst_max_output_bytes.is_none()
+                    || matches!(kind, CliArchiveKind::File | CliArchiveKind::Directory),
+                "--fst-max-output-bytes requires an ordinary FST archive"
             );
             if kind == CliArchiveKind::Encrypted {
                 let password = read_password(password_file.as_deref(), false)?;
@@ -473,14 +510,22 @@ fn run() -> Result<()> {
                     human_rate(report.uncompressed_size, started.elapsed())
                 );
             } else if archive_kind(&input)? == CliArchiveKind::Directory {
-                let report = verify_directory_bundle_with_progress(&input, |_| {})?;
+                let report = verify_directory_bundle_with_limits_and_progress(
+                    &input,
+                    fst_limits(fst_max_output_bytes),
+                    |_| {},
+                )?;
                 println!("archive     : {}", input.display());
                 println!("files       : {}", report.files);
                 println!("original    : {}", human_bytes(report.original_size));
                 println!("archive size: {}", human_bytes(report.archive_size));
                 println!("checksum    : OK ({:.3}s)", started.elapsed().as_secs_f64());
             } else {
-                let report = verify_file(&input)?;
+                let report = verify_file_with_limits_and_progress(
+                    &input,
+                    fst_limits(fst_max_output_bytes),
+                    |_| {},
+                )?;
                 println!("archive     : {}", input.display());
                 println!("chunks      : {}", report.chunk_count);
                 println!("original    : {}", human_bytes(report.original_size));
@@ -605,6 +650,12 @@ fn zip_limits(max_entries: Option<usize>, max_output_bytes: Option<u64>) -> ZipL
 fn encrypted_limits(max_output_bytes: Option<u64>) -> EncryptedLimits {
     EncryptedLimits {
         max_output_bytes: max_output_bytes.unwrap_or(EncryptedLimits::default().max_output_bytes),
+    }
+}
+
+fn fst_limits(max_output_bytes: Option<u64>) -> FstLimits {
+    FstLimits {
+        max_output_bytes: max_output_bytes.unwrap_or(FstLimits::default().max_output_bytes),
     }
 }
 

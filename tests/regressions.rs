@@ -1,8 +1,11 @@
 use fastener::{
-    CompressOptions, ProgressPhase, ZipLimits, compress_bytes,
+    CompressOptions, FstLimits, ProgressPhase, ZipLimits, compress_bytes,
     compress_directory_bundle_with_progress, compress_file_with_progress,
-    compress_zip_file_with_progress, decompress_directory_bundle_with_progress, decompress_file,
-    extract_zip_file, verify_directory_bundle_with_progress, verify_file, verify_zip_file,
+    compress_zip_file_with_progress, decompress_directory_bundle_with_limits_and_progress,
+    decompress_directory_bundle_with_progress, decompress_file,
+    decompress_file_with_limits_and_progress, extract_zip_file,
+    verify_directory_bundle_with_limits_and_progress, verify_directory_bundle_with_progress,
+    verify_file, verify_file_with_limits_and_progress, verify_zip_file,
     verify_zip_file_with_limits,
 };
 use std::{
@@ -147,6 +150,7 @@ fn invalid_zip_does_not_leave_partial_output() {
     writer.write_all(b"child").unwrap();
     writer.finish().unwrap();
 
+    assert!(verify_zip_file(&archive).is_err());
     assert!(extract_zip_file(&archive, &output).is_err());
     assert!(!output.exists());
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
@@ -202,6 +206,32 @@ fn directory_and_zip_reject_windows_device_names() {
 }
 
 #[test]
+fn directory_verification_rejects_file_as_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("collision.fst");
+    let output = temp.path().join("output");
+    let (embedded, _) = compress_bytes(b"x", &CompressOptions::default()).unwrap();
+    let mut bytes = b"FASTDIR1".to_vec();
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&2u64.to_le_bytes());
+    for path in ["node", "node/child"] {
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&(embedded.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(path.as_bytes());
+        bytes.extend_from_slice(&embedded);
+    }
+    fs::write(&archive, bytes).unwrap();
+    assert!(verify_directory_bundle_with_progress(&archive, |_| {}).is_err());
+    assert!(decompress_directory_bundle_with_progress(&archive, &output, |_| {}).is_err());
+    assert!(!output.exists());
+}
+
+#[test]
 fn oversized_fst_chunk_is_rejected_without_decoding() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("large-chunk.fst");
@@ -210,6 +240,77 @@ fn oversized_fst_chunk_is_rejected_without_decoding() {
     archive[68..72].copy_from_slice(&u32::MAX.to_le_bytes());
     fs::write(&archive_path, archive).unwrap();
     assert!(verify_file(&archive_path).is_err());
+}
+
+#[test]
+fn fst_and_directory_expansion_limits_precede_output_creation() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("input.bin");
+    let fst = temp.path().join("input.fst");
+    let restored = temp.path().join("restored.bin");
+    fs::write(&input, vec![3u8; 128 * 1024]).unwrap();
+    compress_file_with_progress(&input, &fst, &CompressOptions::default(), |_| {}).unwrap();
+    let small = FstLimits {
+        max_output_bytes: 1024,
+    };
+    assert!(verify_file_with_limits_and_progress(&fst, small, |_| {}).is_err());
+    assert!(decompress_file_with_limits_and_progress(&fst, &restored, small, |_| {}).is_err());
+    assert!(!restored.exists());
+    let large = FstLimits {
+        max_output_bytes: 128 * 1024,
+    };
+    verify_file_with_limits_and_progress(&fst, large, |_| {}).unwrap();
+    decompress_file_with_limits_and_progress(&fst, &restored, large, |_| {}).unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), fs::read(&input).unwrap());
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("input.bin"), vec![3u8; 128 * 1024]).unwrap();
+    let bundle = temp.path().join("bundle.fst");
+    let directory = temp.path().join("directory");
+    compress_directory_bundle_with_progress(&source, &bundle, &CompressOptions::default(), |_| {})
+        .unwrap();
+    assert!(verify_directory_bundle_with_limits_and_progress(&bundle, small, |_| {}).is_err());
+    assert!(
+        decompress_directory_bundle_with_limits_and_progress(&bundle, &directory, small, |_| {})
+            .is_err()
+    );
+    assert!(!directory.exists());
+    verify_directory_bundle_with_limits_and_progress(&bundle, large, |_| {}).unwrap();
+    decompress_directory_bundle_with_limits_and_progress(&bundle, &directory, large, |_| {})
+        .unwrap();
+    assert_eq!(
+        fs::read(directory.join("input.bin")).unwrap(),
+        fs::read(input).unwrap()
+    );
+
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_fastener"))
+        .arg("verify")
+        .arg(&fst)
+        .args(["--fst-max-output-bytes", "1024"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_fastener"))
+        .arg("verify")
+        .arg(&fst)
+        .args(["--fst-max-output-bytes", "131072"])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+
+    let mut forged = fs::read(&fst).unwrap();
+    forged[12..20].copy_from_slice(&(65u64 * 1024 * 1024 * 1024).to_le_bytes());
+    fs::write(&fst, forged).unwrap();
+    assert!(
+        verify_file(&fst)
+            .unwrap_err()
+            .to_string()
+            .contains("expanded size")
+    );
+    let output = temp.path().join("forged-output");
+    assert!(decompress_file(&fst, &output).is_err());
+    assert!(!output.exists());
 }
 
 #[test]

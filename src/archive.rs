@@ -9,6 +9,21 @@ pub(crate) const RECORD_LEN: usize = 8 + 4 + 4 + 1 + 3 + 32;
 pub(crate) const MAX_CHUNKS: usize = 1_000_000;
 /// The file encoder analyzes at most one 64 MiB segment at a time.
 pub(crate) const MAX_DECODED_CHUNK: usize = 64 * 1024 * 1024;
+const MAX_EXPANDED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+/// Resource limit for reading ordinary FST files and directory bundles.
+#[derive(Clone, Copy, Debug)]
+pub struct FstLimits {
+    pub max_output_bytes: u64,
+}
+
+impl Default for FstLimits {
+    fn default() -> Self {
+        Self {
+            max_output_bytes: MAX_EXPANDED_BYTES,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CompressOptions {
@@ -167,7 +182,11 @@ pub fn compress_bytes(data: &[u8], options: &CompressOptions) -> Result<(Vec<u8>
 }
 
 pub fn decompress_bytes(archive: &[u8]) -> Result<Vec<u8>> {
-    let parsed = parse_archive(archive)?;
+    decompress_bytes_with_limits(archive, FstLimits::default())
+}
+
+pub fn decompress_bytes_with_limits(archive: &[u8], limits: FstLimits) -> Result<Vec<u8>> {
+    let parsed = parse_archive_with_limits(archive, limits)?;
     let decoded: Result<Vec<(usize, Vec<u8>)>> = parsed
         .chunks
         .par_iter()
@@ -207,10 +226,14 @@ pub fn decompress_bytes(archive: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub fn verify_bytes(archive: &[u8]) -> Result<VerifyReport> {
-    let parsed = parse_archive(archive)?;
+    verify_bytes_with_limits(archive, FstLimits::default())
+}
+
+pub fn verify_bytes_with_limits(archive: &[u8], limits: FstLimits) -> Result<VerifyReport> {
+    let parsed = parse_archive_with_limits(archive, limits)?;
     let original_size = parsed.original_size as u64;
     let chunk_count = parsed.chunks.len();
-    let _ = decompress_bytes(archive)?;
+    let _ = decompress_bytes_with_limits(archive, limits)?;
     Ok(VerifyReport {
         original_size,
         archive_size: archive.len() as u64,
@@ -220,7 +243,11 @@ pub fn verify_bytes(archive: &[u8]) -> Result<VerifyReport> {
 }
 
 pub fn inspect_archive(archive: &[u8]) -> Result<VerifyReport> {
-    let parsed = parse_archive(archive)?;
+    inspect_archive_with_limits(archive, FstLimits::default())
+}
+
+pub fn inspect_archive_with_limits(archive: &[u8], limits: FstLimits) -> Result<VerifyReport> {
+    let parsed = parse_archive_with_limits(archive, limits)?;
     Ok(VerifyReport {
         original_size: parsed.original_size as u64,
         archive_size: archive.len() as u64,
@@ -229,7 +256,15 @@ pub fn inspect_archive(archive: &[u8]) -> Result<VerifyReport> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn parse_archive(archive: &[u8]) -> Result<ParsedArchive<'_>> {
+    parse_archive_with_limits(archive, FstLimits::default())
+}
+
+pub(crate) fn parse_archive_with_limits(
+    archive: &[u8],
+    limits: FstLimits,
+) -> Result<ParsedArchive<'_>> {
     ensure!(
         archive.len() >= HEADER_LEN,
         "file is too short to be a Fastener archive"
@@ -241,6 +276,10 @@ pub(crate) fn parse_archive(archive: &[u8]) -> Result<ParsedArchive<'_>> {
     let flags = take_u16(archive, &mut cursor)?;
     ensure!(flags == 0, "unsupported Fastener archive flags");
     let original_size_u64 = take_u64(archive, &mut cursor)?;
+    ensure!(
+        original_size_u64 <= limits.max_output_bytes,
+        "FST expanded size exceeds configured limit"
+    );
     let original_size =
         usize::try_from(original_size_u64).context("original size does not fit this platform")?;
     let chunk_count = take_u32(archive, &mut cursor)? as usize;

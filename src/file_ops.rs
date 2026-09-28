@@ -1,7 +1,9 @@
+#[cfg(test)]
+use crate::archive::parse_archive;
 use crate::{
-    AnalysisBackend, ArchiveStats, CompressOptions, VerifyReport,
+    AnalysisBackend, ArchiveStats, CompressOptions, FstLimits, VerifyReport,
     analyzer::analyze,
-    archive::{HEADER_LEN, MAGIC, MAX_CHUNKS, ParsedChunk, VERSION, parse_archive},
+    archive::{HEADER_LEN, MAGIC, MAX_CHUNKS, ParsedChunk, VERSION, parse_archive_with_limits},
     path_safety::safe_path,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -9,7 +11,7 @@ use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 use std::{
     borrow::Cow,
-    collections::HashSet,
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{BufReader, BufWriter, Read, Seek, Write},
     path::{Path, PathBuf},
@@ -241,6 +243,15 @@ pub fn decompress_file(input: &Path, output: &Path) -> Result<VerifyReport> {
 pub fn decompress_file_with_progress(
     input: &Path,
     output: &Path,
+    progress: impl FnMut(ProgressInfo),
+) -> Result<VerifyReport> {
+    decompress_file_with_limits_and_progress(input, output, FstLimits::default(), progress)
+}
+
+pub fn decompress_file_with_limits_and_progress(
+    input: &Path,
+    output: &Path,
+    limits: FstLimits,
     mut progress: impl FnMut(ProgressInfo),
 ) -> Result<VerifyReport> {
     ensure_distinct(input, output)?;
@@ -252,7 +263,7 @@ pub fn decompress_file_with_progress(
         "file is too short to be a Fastener archive"
     );
     let mapping = map_required(&archive_file)?;
-    let parsed = parse_archive(&mapping)?;
+    let parsed = parse_archive_with_limits(&mapping, limits)?;
     let workers = WorkerTracker::default();
     let mut temporary = temporary_output(output)?;
     let mut restored_mapping = if parsed.original_size == 0 {
@@ -334,6 +345,14 @@ pub fn verify_file(input: &Path) -> Result<VerifyReport> {
 
 pub fn verify_file_with_progress(
     input: &Path,
+    progress: impl FnMut(ProgressInfo),
+) -> Result<VerifyReport> {
+    verify_file_with_limits_and_progress(input, FstLimits::default(), progress)
+}
+
+pub fn verify_file_with_limits_and_progress(
+    input: &Path,
+    limits: FstLimits,
     mut progress: impl FnMut(ProgressInfo),
 ) -> Result<VerifyReport> {
     let archive_file =
@@ -344,7 +363,7 @@ pub fn verify_file_with_progress(
         "file is too short to be a Fastener archive"
     );
     let mapping = map_required(&archive_file)?;
-    let parsed = parse_archive(&mapping)?;
+    let parsed = parse_archive_with_limits(&mapping, limits)?;
     let workers = WorkerTracker::default();
     run_parallel_progress(
         ProgressPhase::Verifying,
@@ -604,7 +623,7 @@ fn read_zip_metadata(input: &Path, limits: ZipLimits) -> Result<Vec<ZipEntryMeta
     let mut archive = open_zip(input)?;
     ensure!(archive.len() <= limits.max_entries, "too many ZIP entries");
     let mut metadata = Vec::with_capacity(archive.len());
-    let mut seen = HashSet::with_capacity(archive.len());
+    let mut seen = HashMap::with_capacity(archive.len());
     for index in 0..archive.len() {
         let entry = archive.by_index(index)?;
         let name = entry.name().strip_suffix('/').unwrap_or(entry.name());
@@ -614,7 +633,10 @@ fn read_zip_metadata(input: &Path, limits: ZipLimits) -> Result<Vec<ZipEntryMeta
             .context("ZIP contains an unsafe path")?
             .to_owned();
         let path_key = path.to_string_lossy().replace('\\', "/").to_lowercase();
-        ensure!(seen.insert(path_key), "ZIP contains duplicate output paths");
+        ensure!(
+            seen.insert(path_key, entry.is_dir()).is_none(),
+            "ZIP contains duplicate output paths"
+        );
         let is_symlink = entry
             .unix_mode()
             .is_some_and(|mode| mode & 0o170000 == 0o120000);
@@ -625,6 +647,16 @@ fn read_zip_metadata(input: &Path, limits: ZipLimits) -> Result<Vec<ZipEntryMeta
             size: entry.size(),
             is_dir: entry.is_dir(),
         });
+    }
+    for path in seen.keys() {
+        let mut remaining = path.as_str();
+        while let Some((parent, _)) = remaining.rsplit_once('/') {
+            ensure!(
+                seen.get(parent) != Some(&false),
+                "ZIP contains a file/path collision"
+            );
+            remaining = parent;
+        }
     }
     Ok(metadata)
 }

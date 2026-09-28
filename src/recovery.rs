@@ -397,6 +397,13 @@ pub fn repair_with_progress(
     )
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RecoveryLimits {
+    pub fst: crate::FstLimits,
+    pub zip: crate::ZipLimits,
+    pub encrypted: crate::EncryptedLimits,
+}
+
 pub fn repair_with_zip_limits_and_progress(
     input: &Path,
     recovery: &Path,
@@ -423,6 +430,28 @@ pub fn repair_with_archive_limits_and_progress(
     password: Option<&[u8]>,
     zip_limits: crate::ZipLimits,
     encrypted_limits: crate::EncryptedLimits,
+    callback: impl FnMut(ProgressInfo),
+) -> Result<RecoveryReport> {
+    repair_with_all_limits_and_progress(
+        input,
+        recovery,
+        output,
+        password,
+        RecoveryLimits {
+            fst: crate::FstLimits::default(),
+            zip: zip_limits,
+            encrypted: encrypted_limits,
+        },
+        callback,
+    )
+}
+
+pub fn repair_with_all_limits_and_progress(
+    input: &Path,
+    recovery: &Path,
+    output: &Path,
+    password: Option<&[u8]>,
+    limits: RecoveryLimits,
     mut callback: impl FnMut(ProgressInfo),
 ) -> Result<RecoveryReport> {
     distinct(input, output)?;
@@ -528,15 +557,23 @@ pub fn repair_with_archive_limits_and_progress(
     );
     match header.kind {
         0 => {
-            crate::verify_file_with_progress(temporary.path(), &mut callback)?;
+            crate::verify_file_with_limits_and_progress(
+                temporary.path(),
+                limits.fst,
+                &mut callback,
+            )?;
         }
         1 => {
-            crate::verify_directory_bundle_with_progress(temporary.path(), &mut callback)?;
+            crate::verify_directory_bundle_with_limits_and_progress(
+                temporary.path(),
+                limits.fst,
+                &mut callback,
+            )?;
         }
         2 => {
             crate::verify_zip_file_with_limits_and_progress(
                 temporary.path(),
-                zip_limits,
+                limits.zip,
                 &mut callback,
             )?;
         }
@@ -544,7 +581,7 @@ pub fn repair_with_archive_limits_and_progress(
             crate::verify_encrypted_with_limits_and_progress(
                 temporary.path(),
                 password.unwrap(),
-                encrypted_limits,
+                limits.encrypted,
                 &mut callback,
             )?;
         }
