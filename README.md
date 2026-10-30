@@ -7,7 +7,7 @@ the CPU scores alternating samples while wgpu scores the other samples at the
 same time. The partial scores are merged before boundaries are selected. Any GPU
 initialization or command failure silently falls back to the full CPU scorer.
 
-## 日本語の説明・新機能
+## 説明・新機能
 
 1.2.3 writes decompressed single-file FST chunks directly into disjoint slices
 of a temporary mapped output. It hashes each bounded batch while its pages are
@@ -325,3 +325,6 @@ The reproducible comparison and measured results are in
 
 See [FORMAT.md](FORMAT.md) for the exact portable container layout.
 
+## 追記
+・本ソフトウェアの説明および実装には一部AIを使用しており、発表原稿を前提とした内容であるため、一部冗長的もしくは余分な説明が混じっているということに留意してください。
+今後日本語・Englishに分割し、Docsを書き直す予定です。
