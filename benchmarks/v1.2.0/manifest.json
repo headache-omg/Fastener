@@ -1,0 +1,9 @@
+{
+  "LogicalProcessors": 20,
+  "CliSha256": "F6F44F0FBFE2870E168C10CFD0C227F8B32F627F564C270BCD28A2C84FA18FDF",
+  "OS": "Microsoft Windows NT 10.0.26200.0",
+  "Version": "fastener 1.2.0",
+  "Iterations": 3,
+  "Threads": 15,
+  "Method": "One warmup + measured runs; process startup and IO included; cache not cleared; SHA256 excluded. Windows PeakWorkingSet64 sampled every 5ms while process runs; may miss the final peak. Repair includes archive verification and encrypted authentication."
+}

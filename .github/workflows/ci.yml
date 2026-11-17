@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust components
+        shell: bash
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint CPU-only build
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+      - name: Test CPU-only build
+        run: cargo test --locked --no-default-features
+      - name: Check GPU-enabled build
+        run: cargo check --locked --all-features

@@ -1,0 +1,30 @@
+[
+  {
+    "Variant": "before",
+    "Corruption": "whole-file hash",
+    "VerifyExit": 0,
+    "DecompressExit": 0,
+    "ExistingOutputPreserved": false
+  },
+  {
+    "Variant": "after",
+    "Corruption": "whole-file hash",
+    "VerifyExit": 1,
+    "DecompressExit": 1,
+    "ExistingOutputPreserved": true
+  },
+  {
+    "Variant": "before",
+    "Corruption": "chunk hash",
+    "VerifyExit": 1,
+    "DecompressExit": 1,
+    "ExistingOutputPreserved": false
+  },
+  {
+    "Variant": "after",
+    "Corruption": "chunk hash",
+    "VerifyExit": 1,
+    "DecompressExit": 1,
+    "ExistingOutputPreserved": true
+  }
+]

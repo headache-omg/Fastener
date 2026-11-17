@@ -1,0 +1,16 @@
+[
+  {
+    "Order": 1,
+    "Variant": "after",
+    "DecompressSeconds": 76.937,
+    "RestoredBytes": 53687091200,
+    "RestoredSHA256": "812CD280A569A63C0B6FC5BAA3AFA5793BA3697006DEC0EC38781B4D2FB7E441"
+  },
+  {
+    "Order": 2,
+    "Variant": "before",
+    "DecompressSeconds": 164.846,
+    "RestoredBytes": 53687091200,
+    "RestoredSHA256": "812CD280A569A63C0B6FC5BAA3AFA5793BA3697006DEC0EC38781B4D2FB7E441"
+  }
+]

@@ -1,0 +1,20 @@
+[
+  {
+    "Case": "small",
+    "BeforeCreateMs": 5.28155,
+    "AfterCreateMs": 5.61645,
+    "CreateReductionPercent": -6.340941579649906,
+    "BeforeRepairMs": 7.08965,
+    "AfterRepairMs": 7.0816,
+    "RepairReductionPercent": 0.11354580268418957
+  },
+  {
+    "Case": "large",
+    "BeforeCreateMs": 184.459,
+    "AfterCreateMs": 66.0951,
+    "CreateReductionPercent": 64.16813492429212,
+    "BeforeRepairMs": 199.09179999999998,
+    "AfterRepairMs": 118.36019999999999,
+    "RepairReductionPercent": 40.54993726512092
+  }
+]

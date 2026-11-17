@@ -1,0 +1,10 @@
+{
+  "Date": "2026-09-25T04:55:22.9630536+09:00",
+  "Threads": 15,
+  "Iterations": 5,
+  "LogicalProcessors": 20,
+  "OS": "Microsoft Windows NT 10.0.26200.0",
+  "BeforeSha256": "D5ED1A2C8F8BD773B1DD37290C822DFC4345C8A42DAAFCB2107CDA12AA2D905D",
+  "AfterSha256": "07D6C9B045ACE777A7693B7C7FAB09A680030A58DF0AF1C3F6BB4C2F0D6E931A",
+  "Method": "Independent release binaries; process startup included; one warmup; alternating order; cached filesystem; SHA256 checks excluded from timing; no cache flush."
+}

@@ -1,0 +1,50 @@
+[
+  {
+    "Case": "mixed-balanced",
+    "InputMiB": 256,
+    "BeforeCompressMs": 1059.811,
+    "AfterCompressMs": 797.7165,
+    "CompressReductionPercent": 24.730305686579957,
+    "BeforeDecompressMs": 262.6906,
+    "AfterDecompressMs": 270.9921,
+    "BeforeVerifyMs": 133.3675,
+    "AfterVerifyMs": 160.8946,
+    "ArchiveBytes": 67143298
+  },
+  {
+    "Case": "mixed-fast",
+    "InputMiB": 256,
+    "BeforeCompressMs": 1077.375,
+    "AfterCompressMs": 807.8314,
+    "CompressReductionPercent": 25.018549715744285,
+    "BeforeDecompressMs": 259.913,
+    "AfterDecompressMs": 269.4953,
+    "BeforeVerifyMs": 141.4376,
+    "AfterVerifyMs": 154.9716,
+    "ArchiveBytes": 68380244
+  },
+  {
+    "Case": "random-balanced",
+    "InputMiB": 128,
+    "BeforeCompressMs": 917.1077,
+    "AfterCompressMs": 805.4827,
+    "CompressReductionPercent": 12.17141672673776,
+    "BeforeDecompressMs": 209.8387,
+    "AfterDecompressMs": 202.4512,
+    "BeforeVerifyMs": 132.7972,
+    "AfterVerifyMs": 143.092,
+    "ArchiveBytes": 134218516
+  },
+  {
+    "Case": "small-balanced",
+    "InputMiB": 1,
+    "BeforeCompressMs": 660.996,
+    "AfterCompressMs": 113.7872,
+    "CompressReductionPercent": 82.78549340691926,
+    "BeforeDecompressMs": 113.4159,
+    "AfterDecompressMs": 115.2208,
+    "BeforeVerifyMs": 105.6995,
+    "AfterVerifyMs": 106.0364,
+    "ArchiveBytes": 256
+  }
+]

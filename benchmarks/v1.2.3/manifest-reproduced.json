@@ -1,0 +1,10 @@
+{
+  "Date": "2026-09-26T22:08:58.8690130+09:00",
+  "InputBytes": 2147483648,
+  "InputSHA256": "E45D1A876A5A425E7DBECEB81E1B2AC906DAD6B3B5EF7B756AA716DD8214B964",
+  "Threads": 8,
+  "Iterations": 4,
+  "BeforeExeSHA256": "888532CCE2D6748F3D1440C4BCD1C6901F68CF79B8DF5C301FA4F57DA2AF5D45",
+  "AfterExeSHA256": "F698AEA92466549429E63DE88E467D591A93762667C14341DF744BF29839FB87",
+  "Method": "Independent release binaries; process startup included; warmup excluded from medians; variants alternated; no cache flush; SHA-256 excluded from timing."
+}

@@ -1,0 +1,12 @@
+{
+  "Version": "1.1.1",
+  "GpuEnabledTests": 44,
+  "CpuOnlyTests": 42,
+  "GpuDevice": "NVIDIA GeForce RTX 5070 Ti",
+  "GpuScoreParity": "passed",
+  "Clippy": "passed",
+  "Format": "passed",
+  "RestoredHashChecks": 48,
+  "ArchiveHashesMatchAcrossVersions": true,
+  "MeasuredCliSha256": "07D6C9B045ACE777A7693B7C7FAB09A680030A58DF0AF1C3F6BB4C2F0D6E931A"
+}
