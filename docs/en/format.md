@@ -1,5 +1,7 @@
 # Fastener container format v1
 
+[日本語](../ja/format.md) · [README](../../README.md)
+
 All integers are unsigned and little-endian. Hashes are 32-byte BLAKE3 digests.
 
 ## File header (60 bytes)
@@ -35,8 +37,7 @@ Current decoders reject decoded chunks larger than 64 MiB to bound allocations
 from untrusted archive records. The file encoder produces at most 64 MiB chunks.
 
 Codec 2 was added by Fastener 0.3.0 without changing the container version. Older
-codec-0/1 archives remain readable. New 0.3.0 archives prioritize codec 2 for
-parallel decode speed.
+codec-0/1 archives remain readable.
 
 ## Directory container v1
 
@@ -81,7 +82,7 @@ Optional encrypted archives use the distinct magic `FSTENC01`, version 1,
 with Argon2id password derivation and XChaCha20-Poly1305 authenticated records.
 File names and whole-file checksums are encrypted as well as compressed data.
 The byte layout, authentication rules, limits, and password handling are specified
-in [暗号化仕様.md](docs/暗号化仕様.md). FASTENR1/FASTDIR1 remain unchanged.
+in [the encryption specification](encryption.md). FASTENR1/FASTDIR1 remain unchanged.
 
-Optional recovery sidecars use a separate format: [FSTPAR01](docs/RECOVERY_FORMAT.md).
+Optional recovery sidecars use a separate format: [FSTPAR01](recovery-format.md).
 

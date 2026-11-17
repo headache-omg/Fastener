@@ -1,4 +1,6 @@
-# 暗号化書庫の仕様と使い方 — Fastener 1.1.0
+# 暗号化FST書庫
+
+[English](../en/encryption.md) · [使い方](usage.md)
 
 ## 使い方
 
@@ -41,9 +43,7 @@ WindowsではポータブルEXEを実行でき、必ずしもインストーラ�
 - 各レコードのnonce: `nonce接頭辞16バイト || レコード番号のu64リトルエンディアン`。
 - 同一書庫では番号0から増加させ、番号を再利用しない。オーバーフローは拒否。
 
-`aes-gcm`等がRayonに含まれているわけではありません。Rayonは圧縮・暗号化・復号の
-独立したチャンクを並列実行する役割です。暗号方式の実装は自作していません。
-ただし、**Fastenerの書庫プロトコル全体は新しい実装で、独立したセキュリティ監査は未実施です。**
+Rayonは圧縮・暗号化・復号の独立したチャンクを並列処理します。書庫プロトコルの独立監査は未実施です。
 
 参照: [RustCrypto XChaCha20-Poly1305](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/)、
 [RustCrypto Argon2](https://docs.rs/argon2/0.5.3/argon2/)。

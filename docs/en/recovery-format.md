@@ -1,5 +1,7 @@
 # FSTPAR01 binary format (version 1)
 
+[日本語](../ja/recovery-format.md) · [Usage](usage.md)
+
 All integers are little-endian. This is an independent recovery sidecar, not a change to FST archive formats. GF(2^8) encoding uses `reed-solomon-erasure` 6.0.0 with 20 data and 2 parity shards in that order.
 
 Layout: `header`, repeated (`index`, `parity 0`, `parity 1`, `index copy`), `header copy`.

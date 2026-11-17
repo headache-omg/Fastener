@@ -1,5 +1,7 @@
 # Changelog
 
+[日本語](../ja/changelog.md)
+
 ## Unreleased
 
 - Default ordinary file/directory FST verification and extraction to a 64 GiB
@@ -115,7 +117,7 @@ Compression took 12–25% less time for the measured 128–256 MiB inputs and 83
 less for the 1 MiB input. Some extraction and verification cases take longer
 because they now perform the previously missing whole-file validation.
 These are cached-filesystem measurements on one machine, not universal guarantees.
-See [the full comparison](benchmarks/debug-speed-2026-09-23/REPORT.md).
+See [the full comparison](benchmarks.md).
 
 ### Validation and compatibility
 
