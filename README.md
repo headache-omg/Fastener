@@ -20,3 +20,4 @@ fastener decompress samples/fastener-demo.txt.fst -o restored.txt
 - [Benchmarks](docs/en/benchmarks.md)
 - [Changelog](docs/en/changelog.md)
 - [MIT license](LICENSE)
+- [Dependency licenses](LICENSES/README.md)
