@@ -20,3 +20,4 @@ fastener decompress samples/fastener-demo.txt.fst -o restored.txt
 - [ベンチマーク](docs/ja/benchmarks.md)
 - [変更履歴](docs/ja/changelog.md)
 - [MITライセンス](LICENSE)
+- [依存ライブラリのライセンス一覧](LICENSES/README.md)
