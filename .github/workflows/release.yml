@@ -1,0 +1,92 @@
+name: Release binaries
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fastener-release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable
+      - run: ./build-release.ps1
+      - name: Check the CLI and stage executables
+        shell: pwsh
+        run: |
+          ./target/release/fastener.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'Fastener CLI failed to start' }
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/fastener.exe dist/fastener-windows-x86_64.exe
+          Copy-Item target/release/fastener-gui.exe dist/fastener-gui-windows-x86_64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*.exe
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable
+      - name: Build and package the CLI
+        run: |
+          cargo +stable build --release --locked --bin fastener
+          ./target/release/fastener --version
+          mkdir -p stage dist
+          install -m 755 target/release/fastener stage/fastener
+          cp LICENSE stage/
+          cp -r LICENSES stage/
+          tar -czf dist/fastener-linux-x86_64.tar.gz -C stage fastener LICENSE LICENSES
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: [windows, linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -nE 's/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' Cargo.toml)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v$version"
+          cd dist
+          sha256sum fastener-*.exe fastener-linux-x86_64.tar.gz > SHA256SUMS
+          cat > release-notes.md <<'EOF'
+          - Windows x86-64 GUI: `fastener-gui-windows-x86_64.exe`
+          - Windows x86-64 CLI: `fastener-windows-x86_64.exe`
+          - Linux x86-64 CLI: extract `fastener-linux-x86_64.tar.gz` and run `./fastener`. Built on Ubuntu 22.04.
+          - SHA-256 checksums: `SHA256SUMS`
+
+          Fastener is distributed under the [MIT license](https://github.com/headache-omg/Fastener/blob/main/LICENSE). See the [dependency license notices](https://github.com/headache-omg/Fastener/blob/main/LICENSES/README.md).
+          EOF
+          if [[ -n $(git ls-remote --tags origin "refs/tags/$tag") ]]; then
+            echo "Tag $tag already exists. Refusing to attach binaries built from a different revision." >&2
+            exit 1
+          fi
+          gh release create "$tag" fastener-*.exe fastener-linux-x86_64.tar.gz SHA256SUMS \
+            --target "$GITHUB_SHA" --title "Fastener $tag" --notes-file release-notes.md --draft
+          gh release edit "$tag" --draft=false
